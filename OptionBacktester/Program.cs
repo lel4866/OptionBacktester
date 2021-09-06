@@ -1,4 +1,10 @@
-﻿#define NO_CALLS
+﻿// This program backtest complex option positions
+// It uses option price data from CBOE Datashop
+// it gets SP500 dividend yield data from Quandl
+// It gets Risk Free Interest rates from FRED
+// It uses my modified version of Jaeckel's Lets Be Rational C++ program to compute option greeks
+
+#define NO_CALLS
 #define PARFOR_READDATA
 #undef PARFOR_ANALYZE
 
@@ -68,13 +74,14 @@ namespace OptionBacktester
         CCS
     }
 
+    // a Position represents a multi-legged option position that was opened at a starting date and time
+    // The trades field contains the list of adjustments to the initial trade (trade[0], incuding the final closing of the trade
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
         internal SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)> options = new SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)>();
 
         internal PositionType positionType; // the original PositionType of the position
-        //internal List<(Option, int)> options; // a list of Options and quantities that make up the "current" position; 
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
         internal DateTime entryDate; // so we can easily calculate dte
         internal float entryValue;
@@ -144,16 +151,7 @@ namespace OptionBacktester
         }
     }
 
-    enum TradeType
-    {
-        None,
-        BalancedButterfly,
-        BrokenWingButterfly,
-        PCS,
-        PDS,
-        Single
-    }
-
+    // a Trade is a list of filled Orders (1 for each set of Puts or Calls in the Trade)
     class Trade
     {
         internal TradeType tradeType = TradeType.None;
@@ -162,19 +160,28 @@ namespace OptionBacktester
         internal List<Order> orders = new List<Order>(); // each order is for a quantity of a single option
     }
 
-    enum OrderType
-    {
+    enum TradeType {
         None,
-        Put,
-        Call,
-        Stock
+        BalancedButterfly,
+        BrokenWingButterfly,
+        PCS,
+        PDS,
+        Single
     }
 
+    // an Order is for a filled quantity of Puts or Calls
     class Order
     {
         internal OrderType orderType = OrderType.None;
         internal OptionData option; // reference to option at entry
         internal int quantity;
+    }
+
+    enum OrderType {
+        None,
+        Put,
+        Call,
+        Stock
     }
 
 #if false
@@ -187,18 +194,18 @@ namespace OptionBacktester
 
     class Program
     {
-        const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "depp in the money"
+        const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
         const int minStrike = 500;
-        const int maxStrike = 3500;
-        const int minDTE = 120;
-        const int maxDTE = 150;
+        const int maxStrike = 10000;
+        const int minDTE = 120; // for opening a position
+        const int maxDTE = 150; // for opening a position
         const int minPositionDTE = 30;
         const float maxLoss = -2000f;
         const float profitTarget= 1000f;
 
-        const float Slippage = 0.05f; // from mid
+        const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
-        const string DataDir = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop/SPX/"; // CBOE DataShop data
+        const string DataDir = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX\"; // CBOE DataShop data
         CultureInfo provider = CultureInfo.InvariantCulture;
 
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
