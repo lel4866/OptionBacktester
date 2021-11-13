@@ -244,6 +244,9 @@ namespace OptionBacktester
             double iv = LetsBeRational.ImpliedVolatility(price, s, K, t, r, d, LetsBeRational.OptionType.Put);
             double delta = LetsBeRational.Delta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
 #endif
+            // test extensions to SortedList
+            TestSortedListExtensionClass.test();
+
             var pgm = new Program();
             pgm.run();
             int a = 1;
@@ -930,27 +933,63 @@ namespace SortedListExtensions
     using DeltaIndex = SortedList<int, OptionBacktester.OptionData>;
     using ExpirationDate = DateTime;
 
+    public static class TestSortedListExtensionClass
+    {
+        internal static void test()
+        {
+            var strikeIndex = new StrikeIndex();
+            var deltaIndex = new DeltaIndex();
+            var list = new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>();
+
+            DateTime d1 = new DateTime(2021, 1, 1);
+            list.Add(d1, (strikeIndex, deltaIndex));
+            var i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d1);
+            Debug.Assert(i1 == 0);
+            i1 = list.IndexOfFirstDateLessThanOrEqualTo(d1);
+            Debug.Assert(i1 == 0);
+
+            DateTime d2 = new DateTime(2021, 1, 2);
+            i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d2);
+            Debug.Assert(i1 == -1);
+            DateTime d0 = new DateTime(2020, 1, 1);
+            i1 = list.IndexOfFirstDateLessThanOrEqualTo(d0);
+            Debug.Assert(i1 == 0);
+
+            list.Add(d2, (strikeIndex, deltaIndex));
+            i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d2);
+            Debug.Assert(i1 == 1);
+            i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d1);
+            Debug.Assert(i1 == 0);
+
+            int xx = 1;
+        }
+    }
+
     public static class SortedListExtensionClass
     {
-        internal static int IndexOfFirstDateGreaterThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate initialExpirationDate)
+        internal static int IndexOfFirstDateGreaterThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate expirationDate)
         {
+            Debug.Assert(options.Count > 0);
             int minIdx = 0;
             int midIdx;
             int maxIdx = options.Count - 1;
+
+            if (maxIdx == 0)
+                return (options.First().Key >= expirationDate) ? 0 : -1;
 
             while (minIdx < maxIdx)
             {
                 midIdx = (minIdx + maxIdx) / 2;
                 DateTime dt = options.ElementAt(midIdx).Key;
-                if (dt == initialExpirationDate)
+                if (dt == expirationDate)
                 {
                     return midIdx;
                 }
-                if (dt < initialExpirationDate)
+                if (dt < expirationDate)
                 {
                     minIdx = midIdx + 1;
                 }
-                else // dt > initialExpirationDate
+                else // dt > expirationDate
                 {
                     maxIdx = midIdx;
                 }
@@ -958,25 +997,29 @@ namespace SortedListExtensions
             return minIdx;
         }
 
-        internal static int IndexOfFirstDateLessThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate initialExpirationDate)
+        internal static int IndexOfFirstDateLessThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate expirationDate)
         {
+            Debug.Assert(options.Count > 0);
             int minIdx = 0;
             int midIdx;
             int maxIdx = options.Count - 1;
+
+            if (maxIdx == 0)
+                return (options.First().Key <= expirationDate) ? 0 : -1;
 
             while (minIdx < maxIdx)
             {
                 midIdx = (minIdx + maxIdx) / 2;
                 DateTime dt = options.ElementAt(midIdx).Key;
-                if (dt == initialExpirationDate)
+                if (dt == expirationDate)
                 {
                     return midIdx;
                 }
-                if (dt > initialExpirationDate)
+                if (dt > expirationDate)
                 {
                     maxIdx = midIdx - 1;
                 }
-                else // dt < initialExpirationDate
+                else // dt < expirationDate
                 {
                     minIdx = midIdx;
                 }
