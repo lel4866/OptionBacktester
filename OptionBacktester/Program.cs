@@ -4,8 +4,10 @@
 // It gets Risk Free Interest rates from FRED
 // It uses my modified version of Jaeckel's Lets Be Rational C++ program to compute option greeks
 
+// This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis
+
 #define NO_CALLS
-#define PARFOR_READDATA
+#undef PARFOR_READDATA
 #undef PARFOR_ANALYZE
 
 using System;
@@ -23,6 +25,8 @@ namespace OptionBacktester
     using StrikeIndex = SortedList<int, OptionData>;
     using DeltaIndex = SortedList<int, OptionData>;
     using ExpirationDate = DateTime;
+    using SortedListExtensions;
+    using System.Net.Http;
 
     class Option
     {
@@ -30,7 +34,7 @@ namespace OptionBacktester
         internal DateTime expiration;
         internal int strike;
         internal LetsBeRational.OptionType optionType;
-        internal float multiplier = 100f; // converts quantity to dollars
+        internal float multiplier = 100f; // converts option prices to dollars
         internal SortedList<DateTime, OptionData> optionData = new SortedList<DateTime, OptionData>();
     }
 
@@ -51,7 +55,6 @@ namespace OptionBacktester
         internal float dividend;
         internal float iv;
         internal int delta100 = -10000; // delta in percent times 100; int so it makes a good index
-        internal float multiplier = 100f; // converts quantity to dollars
     }
 
     class Equity
@@ -75,7 +78,7 @@ namespace OptionBacktester
     }
 
     // a Position represents a multi-legged option position that was opened at a starting date and time
-    // The trades field contains the list of adjustments to the initial trade (trade[0], incuding the final closing of the trade
+    // The trades field contains the list of adjustments to the initial trade (trade[0]), incuding the final closing of the trade
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
@@ -83,16 +86,17 @@ namespace OptionBacktester
 
         internal PositionType positionType; // the original PositionType of the position
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
-        internal DateTime entryDate; // so we can easily calculate dte
-        internal float entryValue;
-        internal float curValue;
-        internal float entryDelta;
-        internal float curDelta;
-        internal bool closePosition;
+        internal DateTime entryDate; // so we can easily calculate DTE (days to expiration)
+        internal float entryValue; // net price in dollars of all options in Position at entry
+        internal float entryDelta; // net delta of all options in Position at entry
 
-        // add an option to options collection if it is not already there.
-        // if it is, adjust quantity
-        // returns false if option quantity now 0 (and removes the option from the options collection)
+        internal float curValue; // internal state use by Backtest() to hold current value of Position in dollars
+        internal float curDelta; // internal state used by backtest90 to hold current delta of position.
+        internal bool closePosition; // internal state used by Backtest() function to decide if this position should be removed from this Position's option SortedList
+
+        // add an option to this Position's options collection if it is not already there.
+        // if it is already there, adjust quantity, and, if quantity now 0, remove it from this Position's option collection
+        // returns false if option quantity became 0
         internal bool AddOption(Option option, int quantity)
         {
             Debug.Assert(quantity != 0);
@@ -121,7 +125,7 @@ namespace OptionBacktester
 
         internal virtual void adjust()
         {
-
+            
         }
     }
 
@@ -151,12 +155,12 @@ namespace OptionBacktester
         }
     }
 
-    // a Trade is a list of filled Orders (1 for each set of Puts or Calls in the Trade)
+    // a Trade is a list of filled Orders (1 Order for each different expiration/strik Put or Call in the Trade)
     class Trade
     {
         internal TradeType tradeType = TradeType.None;
         internal DateTime dt; // when orders placed and filled (this is a backtest...we assume orsers filled instantly)
-        internal float commission; // total commission for all orders
+        internal float commission; // total commission for all orders in Trade
         internal List<Order> orders = new List<Order>(); // each order is for a quantity of a single option
     }
 
@@ -205,7 +209,8 @@ namespace OptionBacktester
 
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
-        const string DataDir = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX\"; // CBOE DataShop data
+        const string DataDir = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX1\"; // CBOE DataShop data
+        const string ExpectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,number_of_exchanges";
         CultureInfo provider = CultureInfo.InvariantCulture;
 
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
@@ -225,7 +230,7 @@ namespace OptionBacktester
         // Second List naturally sorted by Time because data in each file must be in order of time (it is checked to make sure)
         // StrikeIndex = SortedList<int, Option> is for updating existing positions given expiration date and strike
         // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
-        SortedList<DateTime, List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new SortedList<DateTime, List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>>();
+        SortedList<DateTime, List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new();
 
         static void Main(string[] args)
         {
@@ -246,10 +251,12 @@ namespace OptionBacktester
 
         void run()
         {
+
             watch.Start();
 
-            ReadRiskFreeRates(@"C:/Users/lel48/TreasuryRates/");
-            ReadSP500DivYield(@"C:/Users/lel48/TreasuryRates/MULTPL-SP500_DIV_YIELD_MONTH.csv");
+            //ReadRiskFreeRatesFromFRED();
+            //ReadRiskFreeRates(@"C:/Users/lel48/TreasuryRates/");
+            //ReadSP500DivYield(@"C:/Users/lel48/TreasuryRates/MULTPL-SP500_DIV_YIELD_MONTH.csv");
             ReadDataAndComputeGreeks();
 
             watch.Stop();
@@ -277,7 +284,7 @@ namespace OptionBacktester
             IEnumerable<KeyValuePair<int, Option>> res = mySortList.Where(i => i.Key > 30 && i.Key < 60);
 #endif
             // CBOEDataShop 15 minute data (900sec); data can be stored hierarchically (by year, etc)
-            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec_??????????.zip", SearchOption.AllDirectories);
+            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories);
             Array.Sort(zipFileNameArray);
 #if false
             // first List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
@@ -285,14 +292,16 @@ namespace OptionBacktester
             // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
             List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>>();
 #endif
-            // initialize outer List ordered by Date with sub List (ordered by time)
+            // initialize outer List (OptionData), which is ordered by Date, with new empty sub List for each date (sub list will be ordered by time)
             foreach (string zipFileName in zipFileNameArray)
             {
                 DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
 
-                List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> timeSortedList = new List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>();
+                List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> timeSortedList = new();
                 OptionData.Add(zipDate, timeSortedList);
             }
+
+            // now read actual option data from a specific zip file (we have 1 zip file per date), row by row, and add it to sub List for that date
 #if PARFOR_READDATA
             Parallel.ForEach(zipFileNameArray, (zipFileName) =>
             {
@@ -308,23 +317,21 @@ namespace OptionBacktester
 
                 using (ZipArchive archive = ZipFile.OpenRead(zipFileName))
                 {
-                    if (archive.Entries.Count != 1)
-                        throw new Exception($"There must be only one entry in each zip file: {zipFileName}");
+                    Console.WriteLine($"Processing file: {zipFileName}");
                     string fileName = archive.Entries[0].Name;
-                    Console.WriteLine($"Processing file: {fileName}");
+                    if (archive.Entries.Count != 1)
+                        Console.WriteLine($"Warning: {zipFileName} contains more than one file ({archive.Entries.Count}). Processing {fileName}");
                     ZipArchiveEntry zip = archive.Entries[0];
                     DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-#if false
-                    var testdt = new DateTime(2014, 2, 21);
-                    if (zipDate.Date == testdt)
-                    {
-                        int zzz = 1;
-                    }
-#endif
                     List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = OptionData[zipDate]; // optionDataForDay is 3d List[time][dte][delta]
                     using (StreamReader reader = new StreamReader(zip.Open()))
                     {
                         line = reader.ReadLine(); // skip header
+                        if (!line.StartsWith(ExpectedHeader))
+                        {
+                            Console.WriteLine($"Warning: file {fileName} does not have expected header: {line}. Line skiped anyways");
+                            Console.WriteLine($"         Expected header: {ExpectedHeader}");
+                        }
                         validOption = true;
                         int rowIndex = 0;
                         bool newDateTime = false;
@@ -337,20 +344,6 @@ namespace OptionBacktester
                             validOption = ParseOption(line, option, zipDate, ref curDateTime, ref newDateTime);
                             if (validOption)
                             {
-#if false
-                                if (option.strike == 1725)
-                                {
-                                    int aaa = 1;
-                                    if (option.dte == 120)
-                                    {
-                                        int aba = 1;
-                                    }
-                                }
-                                if (option.strike == 550 && option.dte == 16)
-                                {
-                                    int qr = 1;
-                                }
-#endif
                                 ComputeGreeks(option);
                                 optionCount++;
                                 // add option to various collections
@@ -359,7 +352,7 @@ namespace OptionBacktester
                                     // if first option of day, need to create collections
                                     var optionDataForExpirations = new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>();
                                     optionDataForDay.Add(optionDataForExpirations);
-
+#if false
                                     // make sure we have dummy entries in optionDataForExpirations SortedList for initial expirations for when we're searching for new positions
                                     // for instance, if we're searching for STT's between 120 and 150 dte, we need entries in optionDataForExpirations for today+120 days
                                     // hard code this for now...eventually, add a List of dtes to add
@@ -374,6 +367,7 @@ namespace OptionBacktester
                                     // we also need dummy entries in optionDataForExpirations for the start of the delta search. For instance, if we want to find options
                                     // with a delta of 5, we start the search at options with deltas of 3.5, so we must have a dummy (or real) option with a delta of 3.5
                                     // so this initial IndexOfKey will not throw an exception
+#endif
                                 }
 
                                 // now add current option to collections
@@ -391,6 +385,8 @@ namespace OptionBacktester
                                 else
                                 {
                                     optionDataForStrike = optionDataForExpiration.Item1;
+                                    Debug.Assert(optionDataForStrike != null);
+#if false
                                     if (optionDataForStrike == null)
                                     {
                                         // this means we are replacing a dummy option
@@ -402,6 +398,7 @@ namespace OptionBacktester
                                         optionDataForDelta.Add(option.delta100, option);
                                         continue;
                                     }
+#endif
                                     if (optionDataForStrike.ContainsKey(option.strike))
                                     {
                                         Console.WriteLine("Duplicate Strike: {option.strike}");
@@ -445,7 +442,7 @@ namespace OptionBacktester
                                     /// so...we adjust here to avoid that
                                     if (option.delta100 == -1)
                                     {
-
+                                        Debug.Assert(false);
                                     }
                                     optionDataForDelta.Add(option.delta100, option);
                                 }
@@ -568,12 +565,8 @@ namespace OptionBacktester
                 {
                     int cc = 1;
                 }
+                Debug.Assert(option.delta100 != -1);
                 Debug.Assert(Math.Abs(option.delta100) <= 10000);
-#if false
-                if (option.delta100 == -1) {
-                    int bb = 1;
-                }
-#endif
             }
             int a = 1;
         }
@@ -629,7 +622,7 @@ namespace OptionBacktester
                         {
                             var (option, quantity) = kv.Value;
                             OptionData curOption = option.optionData[curDateTime];
-                            position.curValue += quantity * curOption.mid * 100.0f; // a negative value means a credit
+                            position.curValue += quantity * curOption.mid * option.multiplier; // a negative value means a credit
                             position.curDelta += quantity * curOption.delta100 * 0.01f;
                         }
 #if false
@@ -681,8 +674,9 @@ namespace OptionBacktester
                     // first, just select expirations with 120 to 150 dte
                     DateTime initialExpirationDate = day.AddDays(minDTE);
                     DateTime finalExpirationDate = day.AddDays(maxDTE);
-                    int startIndex = optionDataForTime.IndexOfKey(initialExpirationDate);
-                    int endIndex = optionDataForTime.IndexOfKey(finalExpirationDate);
+
+                    int startIndex = optionDataForTime.IndexOfFirstDateGreaterThanOrEqualTo(initialExpirationDate);
+                    int endIndex = optionDataForTime.IndexOfFirstDateLessThanOrEqualTo(finalExpirationDate);
                     if (startIndex >= 0)
                     {
                         if (endIndex < 0)
@@ -813,7 +807,7 @@ namespace OptionBacktester
         void ReadRiskFreeRates(string rfdir)
         {
             DateTime prevDate = new DateTime();
-            var yearArray = new string[] { "2014", "2015", "2016", "2017", "2018", "2019", "2020" };
+            var yearArray = new string[] { "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021" };
             bool findFirstDate = true;
             float prevRate = 0.0f;
             foreach (var year in yearArray)
@@ -928,3 +922,69 @@ namespace OptionBacktester
         }
     }
 }
+
+namespace SortedListExtensions
+{
+    using OptionBacktester;
+    using StrikeIndex = SortedList<int, OptionBacktester.OptionData>;
+    using DeltaIndex = SortedList<int, OptionBacktester.OptionData>;
+    using ExpirationDate = DateTime;
+
+    public static class SortedListExtensionClass
+    {
+        internal static int IndexOfFirstDateGreaterThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate initialExpirationDate)
+        {
+            int minIdx = 0;
+            int midIdx;
+            int maxIdx = options.Count - 1;
+
+            while (minIdx < maxIdx)
+            {
+                midIdx = (minIdx + maxIdx) / 2;
+                DateTime dt = options.ElementAt(midIdx).Key;
+                if (dt == initialExpirationDate)
+                {
+                    return midIdx;
+                }
+                if (dt < initialExpirationDate)
+                {
+                    minIdx = midIdx + 1;
+                }
+                else // dt > initialExpirationDate
+                {
+                    maxIdx = midIdx;
+                }
+            }
+            return minIdx;
+        }
+
+        internal static int IndexOfFirstDateLessThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate initialExpirationDate)
+        {
+            int minIdx = 0;
+            int midIdx;
+            int maxIdx = options.Count - 1;
+
+            while (minIdx < maxIdx)
+            {
+                midIdx = (minIdx + maxIdx) / 2;
+                DateTime dt = options.ElementAt(midIdx).Key;
+                if (dt == initialExpirationDate)
+                {
+                    return midIdx;
+                }
+                if (dt > initialExpirationDate)
+                {
+                    maxIdx = midIdx - 1;
+                }
+                else // dt < initialExpirationDate
+                {
+                    minIdx = midIdx;
+                }
+            }
+            Debug.Assert(minIdx == maxIdx);
+            return minIdx;
+        }
+    }
+}
+
+
