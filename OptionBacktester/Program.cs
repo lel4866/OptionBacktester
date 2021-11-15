@@ -19,6 +19,7 @@ using LetsBeRationalLib;
 using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
+using ReadFredTreasuryRates;
 
 namespace OptionBacktester
 {
@@ -209,12 +210,18 @@ namespace OptionBacktester
 
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
-        const string DataDir = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX1\"; // CBOE DataShop data
+        const string DataDir = @"C:\Users\lel48\CBOEDataShop\";
+        const string DataDir1 = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX1\"; // CBOE DataShop data
         const string ExpectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,number_of_exchanges";
         CultureInfo provider = CultureInfo.InvariantCulture;
-
+#if true
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
         Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
+#endif
+        static DateTime earliestDate = new DateTime(2013, 1, 1);
+        static FredRateReader RateReader = new FredRateReader(earliestDate);
+        static SP500DividendYieldReader DividendReader = new SP500DividendYieldReader(earliestDate);
+
         List<Position> positions = new List<Position>();
         int optionCount = 0; // # of valid Options;
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
@@ -245,7 +252,7 @@ namespace OptionBacktester
             double delta = LetsBeRational.Delta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
 #endif
             // test extensions to SortedList
-            TestSortedListExtensionClass.test();
+            //TestSortedListExtensionClass.test();
 
             var pgm = new Program();
             pgm.run();
@@ -280,6 +287,9 @@ namespace OptionBacktester
 
         void ReadDataAndComputeGreeks()
         {
+            // Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
+            // Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
+
 #if false
             List<string> myList = new List<string>();
             IEnumerable<string> results = myList.Where(s => s == "abc");
@@ -287,7 +297,8 @@ namespace OptionBacktester
             IEnumerable<KeyValuePair<int, Option>> res = mySortList.Where(i => i.Key > 30 && i.Key < 60);
 #endif
             // CBOEDataShop 15 minute data (900sec); data can be stored hierarchically (by year, etc)
-            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories);
+            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervals_900sec_calcs_oi*.zip", SearchOption.AllDirectories);
+            string[] zipFileNameArray1 = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories);
             Array.Sort(zipFileNameArray);
 #if false
             // first List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
@@ -411,7 +422,7 @@ namespace OptionBacktester
 
                                     optionDataForDelta = optionDataForExpiration.Item2;
 
-                                    // this is for reaaly out of the money puts, where delta values are 0.0001 or less
+                                    // this is for really out of the money puts, where delta values are 0.0001 or less
                                     // the roundoff algo will make them all -1...that is, duplicates
                                     //if (option.delta100 > -500) {
                                     if (option.delta100 != 0 && Math.Abs(option.delta100) != 10000)
@@ -476,7 +487,7 @@ namespace OptionBacktester
             if (option.root != "SPX")
                 return false;
 
-            option.optionType = fields[5].Trim() == "p" ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
+            option.optionType = fields[5].Trim().ToUpper() == "P" ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
 #if NO_CALLS
             // we're not interested in Calls right now
             if (option.optionType == LetsBeRational.OptionType.Call)
@@ -532,8 +543,8 @@ namespace OptionBacktester
         {
             // compute iv and delta of option
             double t = option.dte / 365.0;
-            double r = RiskFreeRate[option.dt.Date];
-            double d = SP500DivYield[option.dt.Date];
+            double r = 0.01*RateReader.RiskFreeRate(option.dt.Date, option.dte);
+            double d = 0.01*DividendReader.DividendYield(option.dt.Date);
             option.riskFreeRate = (float)r;
             option.dividend = (float)d;
 
@@ -563,6 +574,7 @@ namespace OptionBacktester
                 {
                     int qq = 1;
                 }
+                double delta100f = 100.0 * delta;
                 option.delta100 = (int)(10000.0 * delta);
                 if (Math.Abs(option.delta100) > 10000)
                 {
