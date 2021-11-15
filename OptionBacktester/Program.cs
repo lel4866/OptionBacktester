@@ -7,6 +7,7 @@
 // This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis
 
 #define NO_CALLS
+#define ONLY25STRIKES
 #undef PARFOR_READDATA
 #undef PARFOR_ANALYZE
 
@@ -54,7 +55,43 @@ namespace OptionBacktester
         internal float riskFreeRate;
         internal float dividend;
         internal float iv;
-        internal int delta100 = -10000; // delta in percent times 100; int so it makes a good index
+        internal float delta;
+        // delta100 is delta in percent times 100; int so it makes a good index; so, if delta is read as -0.5 (at the money put), it will have a delta100 of -5000
+        internal int delta100 = -10000;
+        internal float gamma;
+        internal float theta;
+        internal float vega;
+        internal float rho;
+    }
+
+    // for reading CBOE Data
+    public enum CBOEFields : int
+    {
+        UnderlyingSymbol,
+        DateTime,
+        Root,
+        Expiration,
+        Strike,
+        OptionType,
+        Open,
+        High,
+        Low,
+        Close,
+        TradeVolume,
+        BidSize,
+        Bid,
+        AskSize,
+        Ask,
+        UnderlyingBid,
+        UnderlyingAsk,
+        ImpliedUnderlyingPrice,
+        ActiveUnderlyingPrice,
+        ImpliedVolatility,
+        Delta,
+        Gamma,
+        Theta,
+        Vega,
+        Rho,OpenInterest
     }
 
     class Equity
@@ -479,8 +516,7 @@ namespace OptionBacktester
 
             option.root = fields[2];
 
-            // for now, don't use weekly or quarterly options
-            if (option.root != "SPX")
+            if (option.root != "SPX" && option.root != "SPXW")
                 return false;
 
             option.optionType = fields[5].Trim().ToUpper() == "P" ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
@@ -489,27 +525,29 @@ namespace OptionBacktester
             if (option.optionType == LetsBeRational.OptionType.Call)
                 return false;
 #endif
-            option.strike = (int)(float.Parse(fields[4]) + 0.001f); // +.001 to prevent conversion error
-                                                                    // for now, only conside strikes with even multiples of 25
+            option.strike = (int)(float.Parse(fields[(int)CBOEFields.Strike]) + 0.001f); // +.001 to prevent conversion error
+                                                                                         // for now, only conside strikes with even multiples of 25
+# if ONLY25STRIKES           
             if (option.strike % 25 != 0)
                 return false;
+#endif
             if (option.strike < minStrike || option.strike > maxStrike)
                 return false;
 
-            option.underlying = float.Parse(fields[15]);
+            option.underlying = float.Parse(fields[(int)CBOEFields.UnderlyingBid]);
 
             // we're not interested in ITM strikes right now
             if (noITMStrikes && option.strike >= option.underlying)
                 return false;
 
             //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
-            option.dt = DateTime.Parse(fields[1]);
+            option.dt = DateTime.Parse(fields[(int)CBOEFields.DateTime]);
             // you can have many, many options at same date/time, but once date/time increments, you can't go backwards
             Debug.Assert(option.dt.Date == zipDate);
             Debug.Assert(option.dt >= curDateTime);
 
             //row.expiration = DateTime.ParseExact(fields[3], "yyyy-mm-dd", provider);
-            option.expiration = DateTime.Parse(fields[3]);
+            option.expiration = DateTime.Parse(fields[(int)CBOEFields.Expiration]);
 
             TimeSpan tsDte = option.expiration.Date - option.dt.Date;
             option.dte = tsDte.Days;
@@ -520,11 +558,20 @@ namespace OptionBacktester
             if (option.dte > maxDTE)
                 return false;
 
-            option.ask = float.Parse(fields[14]);
-            option.bid = float.Parse(fields[12]);
+            option.bid = float.Parse(fields[(int)CBOEFields.Bid]);
+            option.ask = float.Parse(fields[(int)CBOEFields.Ask]);
             if (option.ask == 0f && option.bid == 0f)
                 return false;
             option.mid = (0.5f * (option.bid + option.ask));
+
+            option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
+            option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
+            Debug.Assert(Math.Abs(option.delta) <= 1.0f);
+            option.delta100 = (int)(option.delta * 10000.0f);
+            option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
+            option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
+            option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
+            option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
 
             // this test must happen AFTER any "return false;" statements
             if (option.dt > curDateTime)
