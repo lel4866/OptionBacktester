@@ -119,7 +119,7 @@ namespace OptionBacktester
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
-        internal SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)> options = new SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)>();
+        internal SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)> options = new();
 
         internal PositionType positionType; // the original PositionType of the position
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
@@ -268,10 +268,9 @@ namespace OptionBacktester
         //SortedList<DateTime, List<OptionIndexes>> OptionData = new SortedList<DateTime, List<OptionIndexes>>(); // DateTime is a Date; List<Index> is in order of time of day in fixed 15 minute increments
 
         // First List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
-        // Second List naturally sorted by Time because data in each file must be in order of time (it is checked to make sure)
         // StrikeIndex = SortedList<int, Option> is for updating existing positions given expiration date and strike
         // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
-        SortedList<DateTime, List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new();
+        SortedList<DateTime, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new();
 
         static void Main(string[] args)
         {
@@ -345,7 +344,7 @@ namespace OptionBacktester
             {
                 DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
 
-                List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> timeSortedList = new();
+                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> timeSortedList = new();
                 OptionData.Add(zipDate, timeSortedList);
             }
 
@@ -371,7 +370,7 @@ namespace OptionBacktester
                         Console.WriteLine($"Warning: {zipFileName} contains more than one file ({archive.Entries.Count}). Processing {fileName}");
                     ZipArchiveEntry zip = archive.Entries[0];
                     DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-                    List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = OptionData[zipDate]; // optionDataForDay is 3d List[time][dte][delta]
+                    SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = OptionData[zipDate]; // optionDataForDay is 3d List[time][dte][delta]
                     using (StreamReader reader = new StreamReader(zip.Open()))
                     {
                         line = reader.ReadLine(); // skip header
@@ -382,23 +381,23 @@ namespace OptionBacktester
                         }
                         validOption = true;
                         int rowIndex = 0;
-                        bool newDateTime = false;
-                        DateTime curDateTime = new DateTime();
                         while ((line = reader.ReadLine()) != null)
                         {
                             ++rowIndex;
                             if (validOption)
                                 option = new OptionData();
-                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate, ref curDateTime, ref newDateTime);
+                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate);
                             if (validOption)
                             {
                                 optionCount++;
                                 // add option to various collections
-                                if (newDateTime)
+                                int indexOfOptionDateTime = optionDataForDay.IndexOfKey(option.dt);
+                                if (indexOfOptionDateTime == -1)
                                 {
-                                    // if first option of day, need to create collections
-                                    var optionDataForExpirations = new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>();
-                                    optionDataForDay.Add(optionDataForExpirations);
+                                    // first option of day - need to create collections
+                                    optionDataForDay.Add(option.dt, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
+                                    indexOfOptionDateTime = optionDataForDay.IndexOfKey(option.dt);
+                                    Debug.Assert(indexOfOptionDateTime != -1);
 #if false
                                     // make sure we have dummy entries in optionDataForExpirations SortedList for initial expirations for when we're searching for new positions
                                     // for instance, if we're searching for STT's between 120 and 150 dte, we need entries in optionDataForExpirations for today+120 days
@@ -419,7 +418,7 @@ namespace OptionBacktester
 
                                 // now add current option to collections
                                 (StrikeIndex, DeltaIndex) optionDataForExpiration;
-                                var optionDataForTime = optionDataForDay.Last();
+                                var optionDataForTime = optionDataForDay.ElementAt(indexOfOptionDateTime).Value;
                                 bool expirationFound = optionDataForTime.TryGetValue(option.expiration, out optionDataForExpiration);
                                 if (!expirationFound)
                                 {
@@ -507,10 +506,9 @@ namespace OptionBacktester
             int aa = 1;
         }
 
-        static bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate, ref DateTime curDateTime, ref bool newDateTime)
+        static bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate)
         {
             Debug.Assert(option != null);
-            newDateTime = false;
 
             string[] fields = line.Split(',');
 
@@ -542,9 +540,7 @@ namespace OptionBacktester
 
             //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
             option.dt = DateTime.Parse(fields[(int)CBOEFields.DateTime]);
-            // you can have many, many options at same date/time, but once date/time increments, you can't go backwards
-            Debug.Assert(option.dt.Date == zipDate);
-            Debug.Assert(option.dt >= curDateTime);
+            Debug.Assert(option.dt.Date == zipDate); // you can have many, many options at same date/time (different strikes)
 
             //row.expiration = DateTime.ParseExact(fields[3], "yyyy-mm-dd", provider);
             option.expiration = DateTime.Parse(fields[(int)CBOEFields.Expiration]);
@@ -573,12 +569,6 @@ namespace OptionBacktester
             option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
             option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
 
-            // this test must happen AFTER any "return false;" statements
-            if (option.dt > curDateTime)
-            {
-                curDateTime = option.dt;
-                newDateTime = true;
-            }
             return true;
         }
 
@@ -648,14 +638,15 @@ namespace OptionBacktester
             foreach (var keyValuePair in OptionData)
             {
                 DateTime day = keyValuePair.Key;
-                List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = keyValuePair.Value;
+                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = keyValuePair.Value;
                 if (optionDataForDay.Count == 0)
                     Console.WriteLine($"No data for {day.ToString("d")}");
                 else
                     Console.WriteLine($"Processing data for {day.ToString("d")}");
 
-                foreach (SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> optionDataForTime in optionDataForDay)
+                foreach (var sortedListForTime in optionDataForDay)
                 {
+                    SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> optionDataForTime = sortedListForTime.Value;
                     Debug.Assert(optionDataForTime.Count > 0);
                     var i1 = optionDataForTime.Values[0].Item1; // StrikeIndex is a SortedList<int, optionData>
                     Debug.Assert(i1.Count > 0);
