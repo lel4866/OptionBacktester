@@ -41,7 +41,8 @@ namespace OptionBacktester
 
     class OptionData
     {
-        internal Option option;
+        //internal Option option;
+        internal int rowIndex;
         internal DateTime dt;
         internal string root;
         internal DateTime expiration;
@@ -237,7 +238,7 @@ namespace OptionBacktester
     {
         const bool noITMStrikes = true; // we're not interested in in the money strikes right now
         const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
-        const int minStrike = 500;
+        const int minStrike = 625;
         const int maxStrike = 10000;
         const int minDTEToOpen = 150; // for opening a position
         const int maxDTEToOpen = 170; // for opening a position
@@ -380,12 +381,12 @@ namespace OptionBacktester
                             Console.WriteLine($"         Expected header: {expectedHeader}");
                         }
                         validOption = true;
-                        int rowIndex = 0;
+                        int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
                         while ((line = reader.ReadLine()) != null)
                         {
                             ++rowIndex;
-                            if (validOption)
-                                option = new OptionData();
+                            option = new OptionData();
+                            option.rowIndex = rowIndex;
                             validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate);
                             if (validOption)
                             {
@@ -447,49 +448,67 @@ namespace OptionBacktester
 #endif
                                     if (optionDataForStrike.ContainsKey(option.strike))
                                     {
-                                        Console.WriteLine("Duplicate Strike: {option.strike}");
+                                        var duplicateOption = optionDataForStrike[option.strike]; // for debugging
+                                        if (duplicateOption.root == option.root)
+                                            Console.WriteLine($"Duplicate Strike: {option.strike}, for {option.dt}, expiration={option.expiration}");
+                                        else
+                                        { // same date/time, expiration, strike, but different root (SPX vs SPXW)
+                                            Console.WriteLine($"Duplicate Strike for different roots ({option.root}): {option.strike}, for {option.dt}, expiration={option.expiration}");
+                                        }
                                         continue;
                                     }
                                     optionDataForStrike.Add(option.strike, option);
 
                                     optionDataForDelta = optionDataForExpiration.Item2;
-
-                                    // this is for really out of the money puts, where delta values are 0.0001 or less
-                                    // the roundoff algo will make them all -1...that is, duplicates
-                                    //if (option.delta100 > -500) {
-                                    if (option.delta100 != 0 && Math.Abs(option.delta100) != 10000)
+#if true
+                                    // make sure that options with equal deltas but different strikes don't create duplicate delta100 keys
+                                    // this should only occur for small deltas (delta<0.01, way out of the money), and we won't be selecting those options
+                                    // using the optionDataForDelta index, so it doesn't matter if the deltas are off a bit
+                                    if (option.optionType == LetsBeRational.OptionType.Call)
                                     {
-                                        if (option.optionType == LetsBeRational.OptionType.Call)
-                                        {
-                                            Debug.Assert(option.delta100 > 0);
-                                            while (optionDataForDelta.ContainsKey(option.delta100))
-                                                option.delta100++;
+                                        Debug.Assert(option.delta < 0.01);
+                                        Debug.Assert(option.delta100 > 0);
+                                        while (optionDataForDelta.ContainsKey(option.delta100))
+                                            option.delta100++;
 
-                                        }
-                                        else
-                                        {
-                                            Debug.Assert(option.optionType == LetsBeRational.OptionType.Put);
-                                            Debug.Assert(option.delta100 < 0);
-                                            while (optionDataForDelta.ContainsKey(option.delta100))
-                                                option.delta100--;
-                                        }
+                                    }
+                                    else
+                                    {
+                                        Debug.Assert(option.delta > -0.01f);
+                                        Debug.Assert(option.delta100 < 0);
+                                        while (optionDataForDelta.ContainsKey(option.delta100))
+                                            option.delta100--;
                                     }
                                     //}
+#endif
+                                    Debug.Assert(!optionDataForDelta.ContainsKey(option.delta100));
+#if false
                                     if (optionDataForDelta.ContainsKey(option.delta100))
                                     {
                                         if (option.delta100 != 0 && Math.Abs(option.delta100) != 10000)
                                         {
-                                            Console.WriteLine("Duplicate Delta: {option.delta100}");
+                                            // probably same deltas but 2 different strikes that are close.
+                                            var duplicateOption = optionDataForDelta[option.delta100]; // for debugging
+                                            Debug.Assert(duplicateOption.strike != option.strike);
+                                            Console.WriteLine($"Duplicate Delta: delta={option.delta100}, for {option.dt}, expiration={option.expiration}, strike={option.strike}");
+                                        }
+                                        else
+                                        {
+                                            int aaa = 1;
                                         }
                                         continue;
                                     }
+#endif
 
+#if false
                                     // for really OTM strikes, with deltas <= -1, the round off algorithm will make them all -1
-                                    /// so...we adjust here to avoid that
+                                    // so...we adjust here to avoid that
                                     if (option.delta100 == -1)
                                     {
-                                        Debug.Assert(false);
+                                        Console.WriteLine($"Option delta -1 for : {option.dt}, expiration={option.expiration}, strike={option.strike}");
+                                        continue;
                                     }
+#endif
                                     optionDataForDelta.Add(option.delta100, option);
                                 }
 
@@ -525,7 +544,7 @@ namespace OptionBacktester
 #endif
             option.strike = (int)(float.Parse(fields[(int)CBOEFields.Strike]) + 0.001f); // +.001 to prevent conversion error
                                                                                          // for now, only conside strikes with even multiples of 25
-# if ONLY25STRIKES           
+#if ONLY25STRIKES
             if (option.strike % 25 != 0)
                 return false;
 #endif
@@ -562,8 +581,12 @@ namespace OptionBacktester
 
             option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
             option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
-            Debug.Assert(Math.Abs(option.delta) <= 1.0f);
+            if (option.delta == 0f)
+                return false;
+            if (Math.Abs(option.delta) >= 1f)
+                return false;
             option.delta100 = (int)(option.delta * 10000.0f);
+            Debug.Assert(Math.Abs(option.delta100) < 10000);
             option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
             option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
             option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
