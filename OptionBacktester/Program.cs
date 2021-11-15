@@ -19,7 +19,6 @@ using LetsBeRationalLib;
 using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
-using ReadFredTreasuryRates;
 
 namespace OptionBacktester
 {
@@ -199,28 +198,26 @@ namespace OptionBacktester
 
     class Program
     {
+        const bool noITMStrikes = true; // we're not interested in in the money strikes right now
         const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
         const int minStrike = 500;
         const int maxStrike = 10000;
-        const int minDTE = 120; // for opening a position
-        const int maxDTE = 150; // for opening a position
+        const int minDTEToOpen = 150; // for opening a position
+        const int maxDTEToOpen = 170; // for opening a position
         const int minPositionDTE = 30;
         const float maxLoss = -2000f;
         const float profitTarget= 1000f;
 
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
-        const string DataDir = @"C:\Users\lel48\CBOEDataShop\";
-        const string DataDir1 = @"C:\Users\lel48\OneDrive\Documents\CboeDataShop\SPX1\"; // CBOE DataShop data
-        const string ExpectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,number_of_exchanges";
+        const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
+        const string expectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,implied_underlying_price,active_underlying_price,implied_volatility,delta,gamma,theta,vega,rho,open_interest";
         CultureInfo provider = CultureInfo.InvariantCulture;
 #if true
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
         Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
 #endif
         static DateTime earliestDate = new DateTime(2013, 1, 1);
-        static FredRateReader RateReader = new FredRateReader(earliestDate);
-        static SP500DividendYieldReader DividendReader = new SP500DividendYieldReader(earliestDate);
 
         List<Position> positions = new List<Position>();
         int optionCount = 0; // # of valid Options;
@@ -341,10 +338,10 @@ namespace OptionBacktester
                     using (StreamReader reader = new StreamReader(zip.Open()))
                     {
                         line = reader.ReadLine(); // skip header
-                        if (!line.StartsWith(ExpectedHeader))
+                        if (!line.StartsWith(expectedHeader))
                         {
                             Console.WriteLine($"Warning: file {fileName} does not have expected header: {line}. Line skiped anyways");
-                            Console.WriteLine($"         Expected header: {ExpectedHeader}");
+                            Console.WriteLine($"         Expected header: {expectedHeader}");
                         }
                         validOption = true;
                         int rowIndex = 0;
@@ -355,10 +352,9 @@ namespace OptionBacktester
                             ++rowIndex;
                             if (validOption)
                                 option = new OptionData();
-                            validOption = ParseOption(line, option, zipDate, ref curDateTime, ref newDateTime);
+                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate, ref curDateTime, ref newDateTime);
                             if (validOption)
                             {
-                                ComputeGreeks(option);
                                 optionCount++;
                                 // add option to various collections
                                 if (newDateTime)
@@ -474,7 +470,7 @@ namespace OptionBacktester
             int aa = 1;
         }
 
-        static bool ParseOption(string line, OptionData option, DateTime zipDate, ref DateTime curDateTime, ref bool newDateTime)
+        static bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate, ref DateTime curDateTime, ref bool newDateTime)
         {
             Debug.Assert(option != null);
             newDateTime = false;
@@ -503,7 +499,7 @@ namespace OptionBacktester
             option.underlying = float.Parse(fields[15]);
 
             // we're not interested in ITM strikes right now
-            if (option.strike >= option.underlying)
+            if (noITMStrikes && option.strike >= option.underlying)
                 return false;
 
             //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
@@ -543,8 +539,8 @@ namespace OptionBacktester
         {
             // compute iv and delta of option
             double t = option.dte / 365.0;
-            double r = 0.01*RateReader.RiskFreeRate(option.dt.Date, option.dte);
-            double d = 0.01*DividendReader.DividendYield(option.dt.Date);
+            double r = 1.0; // 0.01*RateReader.RiskFreeRate(option.dt.Date, option.dte);
+            double d = 2.0; // 0.01*DividendReader.DividendYield(option.dt.Date);
             option.riskFreeRate = (float)r;
             option.dividend = (float)d;
 
@@ -687,8 +683,8 @@ namespace OptionBacktester
 
                     // now select new positions for this date and time
                     // first, just select expirations with 120 to 150 dte
-                    DateTime initialExpirationDate = day.AddDays(minDTE);
-                    DateTime finalExpirationDate = day.AddDays(maxDTE);
+                    DateTime initialExpirationDate = day.AddDays(minDTEToOpen);
+                    DateTime finalExpirationDate = day.AddDays(maxDTEToOpen);
 
                     int startIndex = optionDataForTime.IndexOfFirstDateGreaterThanOrEqualTo(initialExpirationDate);
                     int endIndex = optionDataForTime.IndexOfFirstDateLessThanOrEqualTo(finalExpirationDate);
