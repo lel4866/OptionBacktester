@@ -23,9 +23,11 @@ using System.Linq;
 
 namespace OptionBacktester
 {
-    using StrikeIndex = SortedList<int, OptionData>;
-    using DeltaIndex = SortedList<int, OptionData>;
+    using StrikeIndex = SortedList<int, OptionData>; // index is strike
+    using DeltaIndex = SortedList<int, OptionData>; // index is delta*10000, a delta of -0.05 for a put has a delta index of -.05*10000 = -500
     using ExpirationDate = DateTime;
+    using Day = DateTime;
+    using Time = DateTime;
     using SortedListExtensions;
     using System.Net.Http;
 
@@ -261,17 +263,16 @@ namespace OptionBacktester
         int optionCount = 0; // # of valid Options;
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
 
-        // For selecting new positions based on dte and delta: [Date][Time][Dte][Delta]; only 1 option at each [date][time][dte][delta]; only 1 root for now
-        //SortedList<DateTime, List<SortedList<int, SortedList<int, Option>>>> OptionData = new SortedList<DateTime, List<SortedList<int, SortedList<int, Option>>>>();
-
-        // for updating current positions based on ExpirationDate and Strike (strike_Expiration_Index), and
-        // for selecting new positions based on dte and delta (dte_delta_Index)
-        //SortedList<DateTime, List<OptionIndexes>> OptionData = new SortedList<DateTime, List<OptionIndexes>>(); // DateTime is a Date; List<Index> is in order of time of day in fixed 15 minute increments
-
-        // First List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
+        // if SPX and SPXW exist for the same expiration date, we throw away the SPXW
+        // For selecting new positions based on dte and strike: [Date][Time][Dte][Strike], or
+        // For selecting new positions based on dte and delta: [Date][Time][Dte][Delta]; deltas are guaranteed to be unique and in order
         // StrikeIndex = SortedList<int, Option> is for updating existing positions given expiration date and strike
         // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
-        SortedList<DateTime, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new();
+        // when we read data, we make sure that for puts, the delta of a smaller strike is less than the delta of a larger strike and,
+        //  for calls, the delta of a smaller strike is greater than that of a larger strike
+        // We separate this into a collect of days followed by a collection of times so we can read Day data in parallel
+        SortedList<Day, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptionData = new();
+        SortedList<Day, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptionData = new();
 
         static void Main(string[] args)
         {
@@ -446,16 +447,24 @@ namespace OptionBacktester
                                         continue;
                                     }
 #endif
-                                    if (optionDataForStrike.ContainsKey(option.strike))
+                                    int keyIndex = optionDataForStrike.IndexOfKey(option.strike);
+                                    if (keyIndex >= 0)
+                                    //if (optionDataForStrike.ContainsKey(option.strike))
                                     {
-                                        var duplicateOption = optionDataForStrike[option.strike]; // for debugging
+                                        var duplicateOption = optionDataForStrike.ElementAt(keyIndex).Value;
                                         if (duplicateOption.root == option.root)
+                                        {
                                             Console.WriteLine($"Duplicate Strike: {option.strike}, for {option.dt}, expiration={option.expiration}");
-                                        else
-                                        { // same date/time, expiration, strike, but different root (SPX vs SPXW)
-                                            Console.WriteLine($"Duplicate Strike for different roots ({option.root}): {option.strike}, for {option.dt}, expiration={option.expiration}");
+                                            continue;
                                         }
-                                        continue;
+
+                                        // same date/time, expiration, strike, but different root (SPX vs SPXW)
+                                        // if original root is SPX, discard SPXW
+                                        if (option.root == "SPXW")
+                                            continue;
+
+                                        // original root is SPXW - remove it and replace it with SPX
+                                        optionDataForStrike.RemoveAt(keyIndex);
                                     }
                                     optionDataForStrike.Add(option.strike, option);
 
@@ -466,7 +475,7 @@ namespace OptionBacktester
                                     // using the optionDataForDelta index, so it doesn't matter if the deltas are off a bit
                                     if (option.optionType == LetsBeRational.OptionType.Call)
                                     {
-                                        Debug.Assert(option.delta < 0.01);
+                                        Debug.Assert(option.delta > 0f);
                                         Debug.Assert(option.delta100 > 0);
                                         while (optionDataForDelta.ContainsKey(option.delta100))
                                             option.delta100++;
@@ -474,7 +483,7 @@ namespace OptionBacktester
                                     }
                                     else
                                     {
-                                        Debug.Assert(option.delta > -0.01f);
+                                        Debug.Assert(option.delta < 0f);
                                         Debug.Assert(option.delta100 < 0);
                                         while (optionDataForDelta.ContainsKey(option.delta100))
                                             option.delta100--;

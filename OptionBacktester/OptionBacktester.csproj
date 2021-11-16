@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <Reference Include="LetsBeRationalLib">
-      <HintPath>..\..\LetsBeRationalLib.cs\LetsBeRationalLib\bin\Debug\netstandard2.1\LetsBeRationalLib.dll</HintPath>
+      <HintPath>..\..\LetsBeRationalLib.cs\LetsBeRationalLib\bin\Debug\net6.0\LetsBeRationalLib.dll</HintPath>
     </Reference>
   </ItemGroup>
 
