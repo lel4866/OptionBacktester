@@ -94,7 +94,7 @@ namespace OptionBacktester
         Gamma,
         Theta,
         Vega,
-        Rho,OpenInterest
+        Rho, OpenInterest
     }
 
     class Equity
@@ -142,7 +142,7 @@ namespace OptionBacktester
             Debug.Assert(quantity != 0);
 
             var key = (option.root, option.expiration, option.strike, option.optionType);
-            (Option, int) value ;
+            (Option, int) value;
             int keyIndex = options.IndexOfKey(key);
             if (keyIndex >= 0)
             {
@@ -165,7 +165,7 @@ namespace OptionBacktester
 
         internal virtual void adjust()
         {
-            
+
         }
     }
 
@@ -204,7 +204,8 @@ namespace OptionBacktester
         internal List<Order> orders = new List<Order>(); // each order is for a quantity of a single option
     }
 
-    enum TradeType {
+    enum TradeType
+    {
         None,
         BalancedButterfly,
         BrokenWingButterfly,
@@ -221,7 +222,8 @@ namespace OptionBacktester
         internal int quantity;
     }
 
-    enum OrderType {
+    enum OrderType
+    {
         None,
         Put,
         Call,
@@ -246,7 +248,7 @@ namespace OptionBacktester
         const int maxDTEToOpen = 170; // for opening a position
         const int minPositionDTE = 30;
         const float maxLoss = -2000f;
-        const float profitTarget= 1000f;
+        const float profitTarget = 1000f;
 
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
@@ -256,8 +258,8 @@ namespace OptionBacktester
 #if true
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
         Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
-#endif
         static DateTime earliestDate = new DateTime(2013, 1, 1);
+#endif
 
         List<Position> positions = new List<Position>();
         int optionCount = 0; // # of valid Options;
@@ -331,9 +333,9 @@ namespace OptionBacktester
             SortedList<int, Option> mySortList = new SortedList<int, Option>();
             IEnumerable<KeyValuePair<int, Option>> res = mySortList.Where(i => i.Key > 30 && i.Key < 60);
 #endif
-            // CBOEDataShop 15 minute data (900sec); data can be stored hierarchically (by year, etc)
-            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervals_900sec_calcs_oi*.zip", SearchOption.AllDirectories);
-            string[] zipFileNameArray1 = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories);
+            // CBOEDataShop 15 minute data (900sec); a separate zip file for each day, so, if programmed correctly, we can read each day in parallel
+            string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervals_900sec_calcs_oi*.zip", SearchOption.AllDirectories); // filename if you bought greeks
+            //string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories); // filename if you didn't buy greeks
             Array.Sort(zipFileNameArray);
 #if false
             // first List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
@@ -341,16 +343,16 @@ namespace OptionBacktester
             // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
             List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>>();
 #endif
-            // initialize outer List (OptionData), which is ordered by Date, with new empty sub List for each date (sub list will be ordered by time)
+            // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
+            // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
             foreach (string zipFileName in zipFileNameArray)
             {
                 DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-
-                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> timeSortedList = new();
-                OptionData.Add(zipDate, timeSortedList);
+                PutOptionData.Add(zipDate, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                CallOptionData.Add(zipDate, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
             }
 
-            // now read actual option data from a specific zip file (we have 1 zip file per date), row by row, and add it to sub List for that date
+            // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
 #if PARFOR_READDATA
             Parallel.ForEach(zipFileNameArray, (zipFileName) =>
             {
@@ -358,12 +360,6 @@ namespace OptionBacktester
             foreach (string zipFileName in zipFileNameArray)
             {
 #endif
-                string line;
-                bool validOption;
-                OptionData option = null;
-                StrikeIndex optionDataForStrike;
-                DeltaIndex optionDataForDelta;
-
                 using (ZipArchive archive = ZipFile.OpenRead(zipFileName))
                 {
                     Console.WriteLine($"Processing file: {zipFileName}");
@@ -372,16 +368,20 @@ namespace OptionBacktester
                         Console.WriteLine($"Warning: {zipFileName} contains more than one file ({archive.Entries.Count}). Processing {fileName}");
                     ZipArchiveEntry zip = archive.Entries[0];
                     DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-                    SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = OptionData[zipDate]; // optionDataForDay is 3d List[time][dte][delta]
+                    SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptionData[zipDate]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                    SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptionData[zipDate]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                    Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
                     using (StreamReader reader = new StreamReader(zip.Open()))
                     {
-                        line = reader.ReadLine(); // skip header
+                        bool validOption;
+                        OptionData option = null;
+                        string line = reader.ReadLine(); // skip header
                         if (!line.StartsWith(expectedHeader))
                         {
                             Console.WriteLine($"Warning: file {fileName} does not have expected header: {line}. Line skiped anyways");
                             Console.WriteLine($"         Expected header: {expectedHeader}");
                         }
-                        validOption = true;
+
                         int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
                         while ((line = reader.ReadLine()) != null)
                         {
@@ -393,157 +393,102 @@ namespace OptionBacktester
                             {
                                 optionCount++;
                                 // add option to various collections
-                                int indexOfOptionDateTime = optionDataForDay.IndexOfKey(option.dt);
-                                if (indexOfOptionDateTime == -1)
-                                {
-                                    // first option of day - need to create collections
-                                    optionDataForDay.Add(option.dt, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
-                                    indexOfOptionDateTime = optionDataForDay.IndexOfKey(option.dt);
-                                    Debug.Assert(indexOfOptionDateTime != -1);
-#if false
-                                    // make sure we have dummy entries in optionDataForExpirations SortedList for initial expirations for when we're searching for new positions
-                                    // for instance, if we're searching for STT's between 120 and 150 dte, we need entries in optionDataForExpirations for today+120 days
-                                    // hard code this for now...eventually, add a List of dtes to add
 
-                                    // add dummy entry for 120 dte - the first dte for STT's we are opening
-                                    // the dummy entry has no StrikeIndex or DeltaIndex, which is how we know it's a dummy
-                                    // if we actually get an option at 120 dte, then it will replace dummy
-                                    DateTime exp120 = option.expiration.AddDays(120);
-                                    optionDataForStrike = optionDataForDelta = null;
-                                    optionDataForExpirations.Add(exp120, (optionDataForStrike, optionDataForDelta));
-
-                                    // we also need dummy entries in optionDataForExpirations for the start of the delta search. For instance, if we want to find options
-                                    // with a delta of 5, we start the search at options with deltas of 3.5, so we must have a dummy (or real) option with a delta of 3.5
-                                    // so this initial IndexOfKey will not throw an exception
-#endif
-                                }
-
-                                // now add current option to collections
-                                (StrikeIndex, DeltaIndex) optionDataForExpiration;
-                                var optionDataForTime = optionDataForDay.ElementAt(indexOfOptionDateTime).Value;
-                                bool expirationFound = optionDataForTime.TryGetValue(option.expiration, out optionDataForExpiration);
+                                // before creating collections for indexing, we have to make sure:
+                                // 1. if there are SPX and SPXW options for the same expiration, we throw away the SPXW
+                                // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
+                                //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
+                                //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
+                                //    We do this by minor adjustments to "true" delta
+                                List<OptionData> optionList;
+                                bool expirationFound = expirationDictionary.TryGetValue(option.expiration, out optionList);
                                 if (!expirationFound)
                                 {
-                                    optionDataForStrike = new StrikeIndex();
-                                    optionDataForDelta = new DeltaIndex();
-                                    optionDataForTime.Add(option.expiration, (optionDataForStrike, optionDataForDelta));
-                                    optionDataForStrike.Add(option.strike, option);
-                                    optionDataForDelta.Add(option.delta100, option);
+                                    optionList = new List<OptionData>();
+                                    optionList.Add(option);
+                                    expirationDictionary.Add(option.expiration, optionList);
                                 }
                                 else
                                 {
-                                    optionDataForStrike = optionDataForExpiration.Item1;
-                                    Debug.Assert(optionDataForStrike != null);
-#if false
-                                    if (optionDataForStrike == null)
+                                    OptionData optionInList = optionList.First();
+                                    if (option.root != optionInList.root)
                                     {
-                                        // this means we are replacing a dummy option
-                                        Debug.Assert(optionDataForExpiration.Item2 == null);
-                                        optionDataForStrike = new StrikeIndex();
-                                        optionDataForDelta = new DeltaIndex();
-                                        //optionDataForTime.Add(option.expiration, (optionDataForStrike, optionDataForDelta));
-                                        optionDataForStrike.Add(option.strike, option);
-                                        optionDataForDelta.Add(option.delta100, option);
-                                        continue;
-                                    }
-#endif
-                                    int keyIndex = optionDataForStrike.IndexOfKey(option.strike);
-                                    if (keyIndex >= 0)
-                                    //if (optionDataForStrike.ContainsKey(option.strike))
-                                    {
-                                        var duplicateOption = optionDataForStrike.ElementAt(keyIndex).Value;
-                                        if (duplicateOption.root == option.root)
-                                        {
-                                            Console.WriteLine($"Duplicate Strike: {option.strike}, for {option.dt}, expiration={option.expiration}");
-                                            continue;
-                                        }
+                                        if (optionInList.root == "SPX")
+                                            continue; // thorw away SPXW option that has same expiration as SPX option
 
-                                        // same date/time, expiration, strike, but different root (SPX vs SPXW)
-                                        // if original root is SPX, discard SPXW
-                                        if (option.root == "SPXW")
-                                            continue;
-
-                                        // original root is SPXW - remove it and replace it with SPX
-                                        optionDataForStrike.RemoveAt(keyIndex);
+                                        // thow away existing List of SPXW options and replace with new list of SPX options
+                                        optionList.Clear();
+                                        optionList.Add(option);
                                     }
-                                    optionDataForStrike.Add(option.strike, option);
-
-                                    optionDataForDelta = optionDataForExpiration.Item2;
-#if true
-                                    // make sure that options with equal deltas but different strikes don't create duplicate delta100 keys
-                                    // this should only occur for small deltas (delta<0.01, way out of the money), and we won't be selecting those options
-                                    // using the optionDataForDelta index, so it doesn't matter if the deltas are off a bit
-                                    if (option.optionType == LetsBeRational.OptionType.Call)
-                                    {
-                                        Debug.Assert(option.delta > 0f);
-                                        Debug.Assert(option.delta100 > 0);
-                                        while (optionDataForDelta.ContainsKey(option.delta100))
-                                            option.delta100++;
-
-                                    }
-                                    else
-                                    {
-                                        Debug.Assert(option.delta < 0f);
-                                        Debug.Assert(option.delta100 < 0);
-                                        while (optionDataForDelta.ContainsKey(option.delta100))
-                                            option.delta100--;
-                                    }
-                                    //}
-#endif
-                                    Debug.Assert(!optionDataForDelta.ContainsKey(option.delta100));
-#if false
-                                    if (optionDataForDelta.ContainsKey(option.delta100))
-                                    {
-                                        if (option.delta100 != 0 && Math.Abs(option.delta100) != 10000)
-                                        {
-                                            // probably same deltas but 2 different strikes that are close.
-                                            var duplicateOption = optionDataForDelta[option.delta100]; // for debugging
-                                            Debug.Assert(duplicateOption.strike != option.strike);
-                                            Console.WriteLine($"Duplicate Delta: delta={option.delta100}, for {option.dt}, expiration={option.expiration}, strike={option.strike}");
-                                        }
-                                        else
-                                        {
-                                            int aaa = 1;
-                                        }
-                                        continue;
-                                    }
-#endif
-
-#if false
-                                    // for really OTM strikes, with deltas <= -1, the round off algorithm will make them all -1
-                                    // so...we adjust here to avoid that
-                                    if (option.delta100 == -1)
-                                    {
-                                        Console.WriteLine($"Option delta -1 for : {option.dt}, expiration={option.expiration}, strike={option.strike}");
-                                        continue;
-                                    }
-#endif
-                                    optionDataForDelta.Add(option.delta100, option);
                                 }
-
                             }
                         }
                     }
-                }
+
+                    foreach (var optionsListKVP in expirationDictionary)
+                        foreach (OptionData option in optionsListKVP.Value)
+                        {
+                            if (option.optionType == LetsBeRational.OptionType.Put)
+                                AddOptionToOptionDataForDay(option, putOptionDataForDay);
+                            else
+                                AddOptionToOptionDataForDay(option, callOptionDataForDay);
+                        }
 #if PARFOR_READDATA
             });
 #else
-            }
+                }
 #endif
-            // now 
-            int aa = 1;
+                // now 
+                int aa = 1;
+            }
         }
 
-        static bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate)
+        void AddOptionToOptionDataForDay(OptionData option, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
+        {
+            StrikeIndex optionDataForStrike;
+            DeltaIndex optionDataForDelta;
+
+            int indexOfOptionTime = optionDataForDay.IndexOfKey(option.dt);
+            if (indexOfOptionTime == -1)
+            {
+                // first option of day - need to create collections
+                optionDataForDay.Add(option.dt, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
+                indexOfOptionTime = optionDataForDay.IndexOfKey(option.dt);
+            }
+
+            // now add current option to collections
+            (StrikeIndex, DeltaIndex) optionDataForExpiration;
+            optionDataForDelta = new DeltaIndex();
+            var optionDataForTime = optionDataForDay.ElementAt(indexOfOptionTime).Value;
+
+            bool expirationFound = optionDataForTime.TryGetValue(option.expiration, out optionDataForExpiration);
+            if (!expirationFound)
+            {
+                optionDataForStrike = new StrikeIndex();
+                optionDataForTime.Add(option.expiration, (optionDataForStrike, optionDataForDelta));
+            }
+            else
+            {
+                optionDataForStrike = optionDataForExpiration.Item1;
+                Debug.Assert(optionDataForStrike != null);
+                if (optionDataForStrike.ContainsKey(option.strike)
+                    {
+                    Console.WriteLine($"Duplicate Strike at {option.dt}: expiration={option.expiration}, strike={option.strike}, ");
+                    return;
+                }
+            }
+
+            optionDataForStrike.Add(option.strike, option);
+        }
+
+        bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate)
         {
             Debug.Assert(option != null);
 
             string[] fields = line.Split(',');
 
             option.root = fields[2];
-
-            if (option.root != "SPX" && option.root != "SPXW")
-                return false;
+            Debug.Assert(option.root == "SPX" || option.root == "SPXW");
 
             option.optionType = fields[5].Trim().ToUpper() == "P" ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
 #if NO_CALLS
@@ -741,7 +686,7 @@ namespace OptionBacktester
                         else
                         {
                             // see if we need to adjust or close position
-                            position.adjust(); 
+                            position.adjust();
                         }
 #if PARFOR_ANALYZE
                     });
