@@ -642,9 +642,11 @@ namespace OptionBacktester
                     return LogError($"*Error*: implied_volatility is equal to 0 for file {fileName}, line {linenum}, iv {option.iv}, {line}"); ;
                 option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
                 if (option.delta == 0f)
-                    return LogError($"*Error*: delta is equal to 0 for file {fileName}, line {linenum}, {line}"); ;
-                if (Math.Abs(option.delta) >= 1f)
-                    return LogError($"*Error*: delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
+                    return LogError($"*Error*: delta is equal to 0 for file {fileName}, line {linenum}, {line}");
+                if (Math.Abs(option.delta) == 1f)
+                    return LogError($"*Error*: absolute value of delta is equal to 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
+                if (Math.Abs(option.delta) > 1f)
+                    return LogError($"*Error*: absolute value of delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
                 option.delta100 = (int)(option.delta * 10000.0f);
                 option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
                 option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
