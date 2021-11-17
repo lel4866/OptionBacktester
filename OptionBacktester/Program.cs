@@ -255,6 +255,7 @@ namespace OptionBacktester
         const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
         const string expectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,implied_underlying_price,active_underlying_price,implied_volatility,delta,gamma,theta,vega,rho,open_interest";
         CultureInfo provider = CultureInfo.InvariantCulture;
+        StreamWriter errorLog = new StreamWriter(Path.Combine(DataDir, "error_log.txt"));
 #if true
         Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
         Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
@@ -292,18 +293,23 @@ namespace OptionBacktester
 
             var pgm = new Program();
             pgm.run();
-            int a = 1;
+        }
+
+        bool LogError(string error)
+        {
+            errorLog.WriteLine(error); 
+            return false;
         }
 
         void run()
         {
-
             watch.Start();
 
             //ReadRiskFreeRatesFromFRED();
             //ReadRiskFreeRates(@"C:/Users/lel48/TreasuryRates/");
             //ReadSP500DivYield(@"C:/Users/lel48/TreasuryRates/MULTPL-SP500_DIV_YIELD_MONTH.csv");
             ReadDataAndComputeGreeks();
+            errorLog.Close();
 
             watch.Stop();
             Console.WriteLine($"Time to read data and compute iv,delta: {0.001 * watch.ElapsedMilliseconds / 60.0} minutes");
@@ -385,12 +391,25 @@ namespace OptionBacktester
 
                         int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
                         int numValidOptions = 0;
-                        while ((line = reader.ReadLine()) != null)
+                        while (true)
                         {
+                            try
+                            {
+                                line = reader.ReadLine();
+                                if (line == null)
+                                    break;
+                            }
+                            catch (System.IO.InvalidDataException ex)
+                            {
+                                string errmsg = $"*Error* InvalidDataException reading file {zipFileName} Row {rowIndex + 1} Message {ex.Message}";
+                                Console.WriteLine(errmsg);
+                                LogError(errmsg);
+                                break;
+                            }
                             ++rowIndex;
                             option = new OptionData();
                             option.rowIndex = rowIndex;
-                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate);
+                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate, fileName, rowIndex);
                             if (validOption)
                             {
                                 numValidOptions++;
@@ -507,19 +526,53 @@ namespace OptionBacktester
             optionDataForDelta.Add(option.delta100, option);
         }
 
-        bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate)
+        bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate, string fileName, int linenum)
         {
             Debug.Assert(option != null);
+            bool noGreekCheck = false;
 
             string[] fields = line.Split(',');
 
-            option.root = fields[2];
-            Debug.Assert(option.root == "SPX" || option.root == "SPXW" || option.root == "SPXQ");
+            if (fields[0] != "^SPX")
+                return LogError($"*Error*: underlying_symbol is not ^SPX for file {fileName}, line {linenum}, underlying_symbol {fields[0]}, {line}");
 
-            option.optionType = fields[5].Trim().ToUpper() == "P" ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
+            option.root = fields[2];
+            if (option.root != "SPX" && option.root != "SPXW" && option.root != "SPXQ")
+                return LogError($"*Error*: root is ot SPX, SPXW, or SPXQ for file {fileName}, line {linenum}, root {option.root}, {line}");
+
+            string optionType = fields[5].Trim().ToUpper();
+            if (optionType != "P" && optionType != "C")
+                return LogError($"*Error*: option_type is neither 'P' or 'C' for file {fileName}, line {linenum}, root {option.root}, {line}");
+            option.optionType = (optionType == "P") ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
+
+            //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
+            option.dt = DateTime.Parse(fields[(int)CBOEFields.DateTime]);
+            Debug.Assert(option.dt.Date == zipDate); // you can have many, many options at same date/time (different strikes)
+
+            //
+            // temporarily not interested in option greeks before 10:00:00 and after 15:30:00
+            //
+
+            // not ever interested in options after 16:00:00
+            switch (option.dt.Hour)
+            {
+                case 16:
+                    if (option.dt.Minute > 0)
+                        return false;
+                    noGreekCheck = true;
+                    break;
+                case < 10:
+                    noGreekCheck = true;
+                    break;
+                case >= 15:
+                    if (option.dt.Minute >= 45)
+                        noGreekCheck = true;
+                    break;
+            }
+
 #if NO_CALLS
-            // we're not interested in Calls right now
-            if (option.optionType == LetsBeRational.OptionType.Call)
+                    // we're not interested in Calls right now
+                    if (option.optionType == LetsBeRational.OptionType.Call)
                 return false;
 #endif
             option.strike = (int)(float.Parse(fields[(int)CBOEFields.Strike]) + 0.001f); // +.001 to prevent conversion error
@@ -533,17 +586,13 @@ namespace OptionBacktester
 
             option.underlying = float.Parse(fields[(int)CBOEFields.UnderlyingBid]);
             if (option.underlying <= 0.0)
-                return false;
+                return LogError($"*Error*: underlying_bid is 0 for file {fileName}, line {linenum}, {line}");
             if (option.underlying < 500.0)
-                return false;
+                return LogError($"*Error*: underlying_bid is less than 500 for file {fileName}, line {linenum}, {line}");
 
             // we're not interested in ITM strikes right now
             if (noITMStrikes && option.strike >= option.underlying)
                 return false;
-
-            //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
-            option.dt = DateTime.Parse(fields[(int)CBOEFields.DateTime]);
-            Debug.Assert(option.dt.Date == zipDate); // you can have many, many options at same date/time (different strikes)
 
             //row.expiration = DateTime.ParseExact(fields[3], "yyyy-mm-dd", provider);
             option.expiration = DateTime.Parse(fields[(int)CBOEFields.Expiration]);
@@ -551,30 +600,36 @@ namespace OptionBacktester
             TimeSpan tsDte = option.expiration.Date - option.dt.Date;
             option.dte = tsDte.Days;
             if (option.dte < 0)
-                return false;
+                return LogError($"*Error*: quote_datetime is later than expiration for file {fileName}, line {linenum}, {line}");
 
             // we're not interested in dte greater than 180 days
             if (option.dte > maxDTE)
                 return false;
 
             option.bid = float.Parse(fields[(int)CBOEFields.Bid]);
+            if (option.bid < 0f)
+                return LogError($"*Error*: bid is less than 0 for file {fileName}, line {linenum}, bid {option.bid}, {line}");
             option.ask = float.Parse(fields[(int)CBOEFields.Ask]);
-            if (option.ask == 0f && option.bid == 0f)
-                return false;
+            if (option.ask < 0f)
+                return LogError($"*Error*: ask is equal less than 0 for file {fileName}, line {linenum}, ask {option.ask}, {line}"); ;
             option.mid = (0.5f * (option.bid + option.ask));
 
-            option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
-            option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
-            if (option.delta == 0f)
-                return false;
-            if (Math.Abs(option.delta) >= 1f)
-                return false;
-            option.delta100 = (int)(option.delta * 10000.0f);
-            Debug.Assert(Math.Abs(option.delta100) < 10000);
-            option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
-            option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
-            option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
-            option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
+            if (!noGreekCheck)
+            {
+                option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
+                if (option.iv <= 0f)
+                    return LogError($"*Error*: implied_volatility is equal to 0 for file {fileName}, line {linenum}, iv {option.iv}, {line}"); ;
+                option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
+                if (option.delta == 0f)
+                    return LogError($"*Error*: delta is equal to 0 for file {fileName}, line {linenum}, {line}"); ;
+                if (Math.Abs(option.delta) >= 1f)
+                    return LogError($"*Error*: delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
+                option.delta100 = (int)(option.delta * 10000.0f);
+                option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
+                option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
+                option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
+                option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
+            }
 
             return true;
         }
