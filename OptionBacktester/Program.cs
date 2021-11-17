@@ -278,13 +278,13 @@ namespace OptionBacktester
 
         static void Main(string[] args)
         {
-#if false
-            double price = 25.01;
+#if true
+            double price = (.75 + .85)/2.0;
             double r = 0.0012; // risk free rate(1 year treasury yield)
             double d = 0.0194; // trailing 12 - month sp500 dividend yield
-            double t = 120.0 / 365.0; // days to expiration / days in year
-            double s = 1843.37; // underlying SPX price
-            double K = 1725.0; // strike price
+            double t = 0.01 / 365.0; // days to expiration / days in year
+            double s = 1786.7; // underlying SPX price
+            double K = 1775.0; // strike price
             double iv = LetsBeRational.ImpliedVolatility(price, s, K, t, r, d, LetsBeRational.OptionType.Put);
             double delta = LetsBeRational.Delta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
 #endif
@@ -313,6 +313,7 @@ namespace OptionBacktester
 
             watch.Stop();
             Console.WriteLine($"Time to read data and compute iv,delta: {0.001 * watch.ElapsedMilliseconds / 60.0} minutes");
+            if (true) return;
 
             watch.Reset();
             watch.Start();
@@ -536,9 +537,13 @@ namespace OptionBacktester
             if (fields[0] != "^SPX")
                 return LogError($"*Error*: underlying_symbol is not ^SPX for file {fileName}, line {linenum}, underlying_symbol {fields[0]}, {line}");
 
-            option.root = fields[2];
+            option.root = fields[2].Trim().ToUpper();
             if (option.root != "SPX" && option.root != "SPXW" && option.root != "SPXQ")
+            {
+                if (option.root == "BSZ")
+                    return false; // ignore binary options on SPX
                 return LogError($"*Error*: root is ot SPX, SPXW, or SPXQ for file {fileName}, line {linenum}, root {option.root}, {line}");
+            }
 
             string optionType = fields[5].Trim().ToUpper();
             if (optionType != "P" && optionType != "C")
@@ -559,20 +564,20 @@ namespace OptionBacktester
                 case 16:
                     if (option.dt.Minute > 0)
                         return false;
-                    noGreekCheck = true;
+                    //noGreekCheck = true;
                     break;
                 case < 10:
-                    noGreekCheck = true;
+                    //noGreekCheck = true;
                     break;
                 case >= 15:
-                    if (option.dt.Minute >= 45)
-                        noGreekCheck = true;
+                    //if (option.dt.Minute >= 45)
+                    //    noGreekCheck = true;
                     break;
             }
 
 #if NO_CALLS
-                    // we're not interested in Calls right now
-                    if (option.optionType == LetsBeRational.OptionType.Call)
+            // we're not interested in Calls right now
+            if (option.optionType == LetsBeRational.OptionType.Call)
                 return false;
 #endif
             option.strike = (int)(float.Parse(fields[(int)CBOEFields.Strike]) + 0.001f); // +.001 to prevent conversion error
@@ -616,6 +621,22 @@ namespace OptionBacktester
 
             if (!noGreekCheck)
             {
+                // do my own computation if dte == 0
+                if (option.dte == 0)
+                {
+                    double dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9*3600 + 1800) / (390*60); // fraction of 390 minute main session
+                    double t = dteFraction / 365.0; // days to expiration / days in year
+                    double s = option.underlying; // underlying SPX price
+                    double K = (double)option.strike; // strike price
+                    option.iv = (float)LetsBeRational.ImpliedVolatility((double)option.mid, s, K, t, 0.0, 0.0, LetsBeRational.OptionType.Put);
+                    option.delta = (float)LetsBeRational.Delta(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
+                    option.delta100 = (int)(option.delta * 10000.0f);
+                    option.theta = (float)LetsBeRational.Theta(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
+                    option.gamma = (float)LetsBeRational.Gamma(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
+                    option.vega = (float)LetsBeRational.Vega(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
+                    option.rho = (float)LetsBeRational.Rho(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
+                    return true;
+                }
                 option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
                 if (option.iv <= 0f)
                     return LogError($"*Error*: implied_volatility is equal to 0 for file {fileName}, line {linenum}, iv {option.iv}, {line}"); ;
