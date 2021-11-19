@@ -292,7 +292,7 @@ namespace OptionBacktester
 
         void run()
         {
-#if true
+#if false
             DateTime optdt = new DateTime(2019, 8, 7);
             DateTime expdt = new DateTime(2019, 8, 9);
             double price = (9.3 + 9.7) / 2.0;
