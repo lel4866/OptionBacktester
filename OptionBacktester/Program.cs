@@ -645,10 +645,6 @@ namespace OptionBacktester
                 double dteFraction = option.dte;
                 if (option.dte == 0)
                     dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9*3600 + 1800) / (390*60); // fraction of 390 minute main session
-                else
-                {
-                    int xxx = 1;
-                }
                 double t = dteFraction / 365.0; // days to expiration / days in year
                 double s = option.underlying; // underlying SPX price
                 double K = (double)option.strike; // strike price
