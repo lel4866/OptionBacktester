@@ -20,6 +20,7 @@ using LetsBeRationalLib;
 using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
+using ReadFredTreasuryRates;
 using Npgsql; // for postgres
 
 namespace OptionBacktester

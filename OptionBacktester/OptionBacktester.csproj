@@ -7,11 +7,12 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Toolkit.HighPerformance" Version="7.1.1" />
+    <PackageReference Include="Npgsql" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Reference Include="LetsBeRationalLib">
-      <HintPath>..\..\LetsBeRationalLib.cs\LetsBeRationalLib\bin\Debug\net6.0\LetsBeRationalLib.dll</HintPath>
+      <HintPath>..\..\LetsBeRationalLib.cs\LetsBeRationalLib\bin\Release\net6.0\LetsBeRationalLib.dll</HintPath>
     </Reference>
     <Reference Include="ReadFredTreasuryRates">
       <HintPath>..\..\ReadFredTreasuryRates.cs\ReadFredTreasuryRates\bin\Release\net6.0\ReadFredTreasuryRates.dll</HintPath>
