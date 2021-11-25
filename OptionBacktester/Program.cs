@@ -260,11 +260,9 @@ namespace OptionBacktester
         const string expectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,implied_underlying_price,active_underlying_price,implied_volatility,delta,gamma,theta,vega,rho,open_interest";
         CultureInfo provider = CultureInfo.InvariantCulture;
         StreamWriter errorLog = new StreamWriter(Path.Combine(DataDir, "error_log.txt"));
-#if true
-        Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
-        Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
-        static DateTime earliestDate = new DateTime(2013, 1, 1);
-#endif
+
+        FredRateReader rate_reader = new FredRateReader(new DateTime(2013, 1, 1));
+        SP500DividendYieldReader dividend_reader = new SP500DividendYieldReader(new DateTime(2013, 1, 1));
 
         List<Position> positions = new List<Position>();
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
@@ -282,16 +280,6 @@ namespace OptionBacktester
 
         static void Main(string[] args)
         {
-#if true
-            double price = (.75 + .85)/2.0;
-            double r = 0.0012; // risk free rate(1 year treasury yield)
-            double d = 0.0194; // trailing 12 - month sp500 dividend yield
-            double t = 0.01 / 365.0; // days to expiration / days in year
-            double s = 1786.7; // underlying SPX price
-            double K = 1775.0; // strike price
-            double iv = LetsBeRational.ImpliedVolatility(price, s, K, t, r, d, LetsBeRational.OptionType.Put);
-            double delta = LetsBeRational.Delta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
-#endif
             // test extensions to SortedList
             //TestSortedListExtensionClass.test();
 
@@ -307,11 +295,26 @@ namespace OptionBacktester
 
         void run()
         {
+#if false
+            DateTime optdt = new DateTime(2019, 8, 7);
+            DateTime expdt = new DateTime(2019, 8, 9);
+            double price = (9.3 + 9.7) / 2.0;
+            double d = 0.01 * dividend_reader.DividendYield(optdt); // trailing 12 - month sp500 dividend yield
+            int dte = (expdt - optdt).Days;
+            double t = dte / 365.0; // days to expiration / days in year
+            double r = 0.01 * rate_reader.RiskFreeRate(optdt, dte); // risk free rate(1 year treasury yield)
+            double s = (2888.04 + 2888.88) / 2; // underlying SPX price
+            double K = 2850.0; // strike price
+            double iv = LetsBeRational.ImpliedVolatility(price, s, K, t, r, d, LetsBeRational.OptionType.Put);
+            double delta = LetsBeRational.Delta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
+            double theta = LetsBeRational.Theta(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
+            double gamma = LetsBeRational.Gamma(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
+            double vega = LetsBeRational.Vega(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
+            double rho = LetsBeRational.Rho(s, K, t, r, iv, d, LetsBeRational.OptionType.Put);
+#endif
+
             watch.Start();
 
-            //ReadRiskFreeRatesFromFRED();
-            //ReadRiskFreeRates(@"C:/Users/lel48/TreasuryRates/");
-            //ReadSP500DivYield(@"C:/Users/lel48/TreasuryRates/MULTPL-SP500_DIV_YIELD_MONTH.csv");
             ReadDataAndComputeGreeks();
             errorLog.Close();
 
@@ -420,7 +423,23 @@ namespace OptionBacktester
                     {
                         bool validOption;
                         OptionData option = null;
-                        string line = reader.ReadLine(); // skip header
+
+                        // read header
+                        string line;
+                        try
+                        {
+                            line = reader.ReadLine();
+                            if (line == null)
+                                break;
+                        }
+                        catch (System.IO.InvalidDataException ex)
+                        {
+                            string errmsg = $"*Error* InvalidDataException reading file {zipFileName} Row 1 Message {ex.Message}";
+                            Console.WriteLine(errmsg);
+                            LogError(errmsg);
+                            break;
+                        }
+
                         if (!line.StartsWith(expectedHeader))
                         {
                             Console.WriteLine($"Warning: file {fileName} does not have expected header: {line}. Line skiped anyways");
@@ -553,7 +572,7 @@ namespace OptionBacktester
                 }
                 while (optionDataForDelta.ContainsKey(option.delta100))
                 {
-                    var xxx = optionDataForDelta[option.delta100]; // debug
+                    //var xxx = optionDataForDelta[option.delta100]; // debug
                     if (option.optionType == LetsBeRational.OptionType.Put)
                         option.delta100--;
                     else
@@ -567,7 +586,6 @@ namespace OptionBacktester
         bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate, string fileName, int linenum)
         {
             Debug.Assert(option != null);
-            bool noGreekCheck = false;
 
             string[] fields = line.Split(',');
 
@@ -577,9 +595,9 @@ namespace OptionBacktester
             option.root = fields[2].Trim().ToUpper();
             if (option.root != "SPX" && option.root != "SPXW" && option.root != "SPXQ")
             {
-                if (option.root == "BSZ")
+                if (option.root == "BSZ" || option.root == "SRO")
                     return false; // ignore binary options on SPX
-                return LogError($"*Error*: root is ot SPX, SPXW, or SPXQ for file {fileName}, line {linenum}, root {option.root}, {line}");
+                return LogError($"*Error*: root is not SPX, SPXW, or SPXQ for file {fileName}, line {linenum}, root {option.root}, {line}");
             }
 
             string optionType = fields[5].Trim().ToUpper();
@@ -601,14 +619,6 @@ namespace OptionBacktester
                 case 16:
                     if (option.dt.Minute > 0)
                         return false;
-                    //noGreekCheck = true;
-                    break;
-                case < 10:
-                    //noGreekCheck = true;
-                    break;
-                case >= 15:
-                    //if (option.dt.Minute >= 45)
-                    //    noGreekCheck = true;
                     break;
             }
 
@@ -653,43 +663,53 @@ namespace OptionBacktester
                 return LogError($"*Error*: bid is less than 0 for file {fileName}, line {linenum}, bid {option.bid}, {line}");
             option.ask = float.Parse(fields[(int)CBOEFields.Ask]);
             if (option.ask < 0f)
-                return LogError($"*Error*: ask is equal less than 0 for file {fileName}, line {linenum}, ask {option.ask}, {line}"); ;
+                return LogError($"*Error*: ask is less than 0 for file {fileName}, line {linenum}, ask {option.ask}, {line}"); ;
             option.mid = (0.5f * (option.bid + option.ask));
-
-            if (!noGreekCheck)
+#if true
+            if (option.mid == 0)
             {
-                // do my own computation if dte == 0
-                if (option.dte == 0)
-                {
-                    double dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9*3600 + 1800) / (390*60); // fraction of 390 minute main session
-                    double t = dteFraction / 365.0; // days to expiration / days in year
-                    double s = option.underlying; // underlying SPX price
-                    double K = (double)option.strike; // strike price
-                    option.iv = (float)LetsBeRational.ImpliedVolatility((double)option.mid, s, K, t, 0.0, 0.0, LetsBeRational.OptionType.Put);
-                    option.delta = (float)LetsBeRational.Delta(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
-                    option.delta100 = (int)(option.delta * 10000.0f);
-                    option.theta = (float)LetsBeRational.Theta(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
-                    option.gamma = (float)LetsBeRational.Gamma(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
-                    option.vega = (float)LetsBeRational.Vega(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
-                    option.rho = (float)LetsBeRational.Rho(s, K, t, 0.0, option.iv, 0.0, LetsBeRational.OptionType.Put);
-                    return true;
-                }
-                option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
-                if (option.iv <= 0f)
-                    return LogError($"*Error*: implied_volatility is equal to 0 for file {fileName}, line {linenum}, iv {option.iv}, {line}"); ;
-                option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
-                if (option.delta == 0f)
-                    return LogError($"*Error*: delta is equal to 0 for file {fileName}, line {linenum}, {line}");
-                if (Math.Abs(option.delta) == 1f)
-                    return LogError($"*Error*: absolute value of delta is equal to 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
-                if (Math.Abs(option.delta) > 1f)
-                    return LogError($"*Error*: absolute value of delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
-                option.delta100 = (int)(option.delta * 10000.0f);
-                option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
-                option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
-                option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
-                option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
+                option.iv = option.delta = option.gamma = option.vega = option.rho = 0f;
+                return true; // I keep this option in case it is in a Position
             }
+#endif
+            // do my own computation if dte == 0 or iv == 0 or delta == 0
+            option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
+            option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
+
+            if (option.dte == 0 || option.iv == 0 || option.delta == 0)
+            {
+                double dteFraction = option.dte;
+                if (option.dte == 0)
+                    dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9*3600 + 1800) / (390*60); // fraction of 390 minute main session
+                double t = dteFraction / 365.0; // days to expiration / days in year
+                double s = option.underlying; // underlying SPX price
+                double K = (double)option.strike; // strike price
+                double q = 0.01 * dividend_reader.DividendYield(option.dt); // trailing 12 - month sp500 dividend yield
+                double r = 0.01 * rate_reader.RiskFreeRate(option.dt, (option.dte == 0) ? 1 : option.dte); // risk free rate(1 year treasury yield)
+
+                option.iv = (float)LetsBeRational.ImpliedVolatility((double)option.mid, s, K, t, r, q, LetsBeRational.OptionType.Put);
+                option.delta = (float)LetsBeRational.Delta(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
+                option.delta100 = (int)(option.delta * 10000.0f);
+                option.theta = (float)LetsBeRational.Theta(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
+                option.gamma = (float)LetsBeRational.Gamma(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
+                option.vega = (float)LetsBeRational.Vega(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
+                option.rho = (float)LetsBeRational.Rho(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
+                return true;
+            }
+
+            if (option.iv <= 0f)
+                return LogError($"*Error*: implied_volatility is equal to 0 for file {fileName}, line {linenum}, iv {option.iv}, {line}"); ;
+            if (option.delta == 0f)
+                return LogError($"*Error*: delta is equal to 0 for file {fileName}, line {linenum}, {line}");
+            if (Math.Abs(option.delta) == 1f)
+                return LogError($"*Error*: absolute value of delta is equal to 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
+            if (Math.Abs(option.delta) > 1f)
+                return LogError($"*Error*: absolute value of delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
+            option.delta100 = (int)(option.delta * 10000.0f);
+            option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
+            option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
+            option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
+            option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
 
             return true;
         }
@@ -965,95 +985,6 @@ namespace OptionBacktester
             positions.Add(position);
 
             return position;
-        }
-
-        // populate: Dictionary<DateTime, float> RiskFreeRate;
-        // reads from https://www.treasury.gov/resource-center/data-chart-center/interest-rates/Pages/TextView.aspx?data=yield
-
-        void ReadRiskFreeRates(string rfdir)
-        {
-            DateTime prevDate = new DateTime();
-            var yearArray = new string[] { "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021" };
-            bool findFirstDate = true;
-            float prevRate = 0.0f;
-            foreach (var year in yearArray)
-            {
-                var filename = $"{rfdir}{year}.csv";
-                string[] lines = System.IO.File.ReadAllLines(filename);
-                int lineno = 0;
-                foreach (string line in lines)
-                {
-                    lineno++;
-                    string[] fields = line.Split(',');
-                    if (fields.Length != 2)
-                        throw new Exception($"Each line in risk free interest rate file must contain 2 values (date, rate): {lineno}");
-                    var date = DateTime.Parse(fields[0]);
-                    var rate = float.Parse(fields[1]);
-
-                    // save date and rate of first line
-                    if (findFirstDate)
-                    {
-                        findFirstDate = false;
-                        prevDate = date.AddDays(-1.0);
-                        prevRate = rate;
-                    }
-
-                    // add entries for which there are no lines in file
-                    DateTime yesterday = date.AddDays(-1.0);
-                    while (prevDate < yesterday)
-                    {
-                        prevDate = prevDate.AddDays(1.0);
-                        RiskFreeRate.Add(prevDate, prevRate * 0.01f);
-                    }
-
-                    Debug.Assert(date == date.Date);
-                    RiskFreeRate.Add(date, rate * 0.01f);
-                    prevDate = date;
-                    prevRate = rate;
-                }
-            }
-        }
-
-        // populate: Dictionary<DateTime, float> SP500DivYield;
-        // reads file downloaded from Quandl: https://www.quandl.com/data/MULTPL/SP500_DIV_YIELD_MONTH-S-P-500-Dividend-Yield-by-Month
-        void ReadSP500DivYield(string filename)
-        {
-            DateTime prevDate = new DateTime();
-            bool findFirstDate = true;
-            float prevYield = 0.0f;
-
-            string[] lines = System.IO.File.ReadAllLines(filename);
-            int lineno = 0;
-            foreach (string line in lines)
-            {
-                lineno++;
-                string[] fields = line.Split(',');
-                if (fields.Length != 2)
-                    throw new Exception($"Each line in sp500 dividend yield file must contain 2 values (date, yield): {lineno}");
-                var date = DateTime.Parse(fields[0]);
-                var yield = float.Parse(fields[1]);
-
-                // save date and rate of first line
-                if (findFirstDate)
-                {
-                    findFirstDate = false;
-                    prevDate = date.AddDays(-1.0);
-                    prevYield = yield;
-                }
-
-                // add entries for which there are no lines in file
-                DateTime yesterday = date.AddDays(-1.0);
-                while (prevDate < yesterday)
-                {
-                    prevDate = prevDate.AddDays(1.0);
-                    SP500DivYield.Add(prevDate, prevYield * 0.01f);
-                }
-
-                Debug.Assert(date == date.Date);
-                SP500DivYield.Add(date, yield * 0.01f);
-                prevDate = date;
-                prevYield = yield;
-            }
         }
     }
 
