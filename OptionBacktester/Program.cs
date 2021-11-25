@@ -72,32 +72,24 @@ namespace OptionBacktester
     // for reading CBOE Data
     public enum CBOEFields : int
     {
-        UnderlyingSymbol,
+        UnderlyingSymbol = 0,
         QuoteDateTime,
-        Root,
         Expiration,
         Strike,
         OptionType,
-        Open,
-        High,
-        Low,
-        Close,
-        TradeVolume,
-        BidSize,
+        Root,
+        Underlying,
         Bid,
-        AskSize,
         Ask,
-        UnderlyingBid,
-        UnderlyingAsk,
-        ImpliedUnderlyingPrice,
-        ActiveUnderlyingPrice,
         ImpliedVolatility,
         Delta,
         Gamma,
         Theta,
         Vega,
-        Rho, 
-        OpenInterest
+        Rho,
+        OpenInterest,
+        RiskFreeRate,
+        DividendYield
     }
 
     class Equity
@@ -243,7 +235,6 @@ namespace OptionBacktester
 
     class Program
     {
-        const bool noITMStrikes = true; // we're not interested in in the money strikes right now
         const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
         const int minStrike = 625;
         const int maxStrike = 10000;
@@ -258,7 +249,6 @@ namespace OptionBacktester
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
         const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
-        const string expectedHeader = "underlying_symbol,quote_datetime,root,expiration,strike,option_type,open,high,low,close,trade_volume,bid_size,bid,ask_size,ask,underlying_bid,underlying_ask,implied_underlying_price,active_underlying_price,implied_volatility,delta,gamma,theta,vega,rho,open_interest";
         CultureInfo provider = CultureInfo.InvariantCulture;
         StreamWriter errorLog = new StreamWriter(Path.Combine(DataDir, "error_log.txt"));
 
@@ -282,7 +272,7 @@ namespace OptionBacktester
         static void Main(string[] args)
         {
             // test extensions to SortedList
-            //TestSortedListExtensionClass.test();
+            // TestSortedListExtensionClass.test();
 
             var pgm = new Program();
             pgm.run();
@@ -290,7 +280,7 @@ namespace OptionBacktester
 
         bool LogError(string error)
         {
-            errorLog.WriteLine(error); 
+            errorLog.WriteLine(error);
             return false;
         }
 
@@ -366,12 +356,12 @@ namespace OptionBacktester
             DateTime first_dt, last_dt;
             string get_first_date_cmd = "select min(quotedatetime) from OptionData;";
             string get_last_date_cmd = "select max(quotedatetime) from OptionData;";
-            using (NpgsqlConnection conn1 = new(connectionString))
+            using (NpgsqlConnection conn = new(connectionString))
             {
-                conn1.Open();
-                Npgsql.NpgsqlCommand sqlCommand1 = new(get_first_date_cmd, conn1); // Postgres
+                conn.Open();
+                Npgsql.NpgsqlCommand sqlCommand1 = new(get_first_date_cmd, conn); // Postgres
                 first_dt = Convert.ToDateTime(sqlCommand1.ExecuteScalar());
-                Npgsql.NpgsqlCommand sqlCommand2 = new(get_last_date_cmd, conn1); // Postgres
+                Npgsql.NpgsqlCommand sqlCommand2 = new(get_last_date_cmd, conn); // Postgres
                 last_dt = Convert.ToDateTime(sqlCommand2.ExecuteScalar());
             }
 
@@ -392,144 +382,108 @@ namespace OptionBacktester
 
             // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
-            foreach (string zipFileName in zipFileNameArray)
+            foreach (var quote_dt in dt_list)
             {
-                DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-                PutOptions.Add(zipDate, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
-                CallOptions.Add(zipDate, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                PutOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                CallOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
             }
 
             // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
 #if PARFOR_READDATA
-            Parallel.ForEach(zipFileNameArray, (zipFileName) =>
+            Parallel.ForEach(dt_list, (quote_dt) =>
             {
 #else
-            foreach (string zipFileName in zipFileNameArray)
+            foreach (var quote_dt in dt_list)
             {
 #endif
-                using (ZipArchive archive = ZipFile.OpenRead(zipFileName))
+                Console.WriteLine($"Reading date: {quote_dt.ToString("yyyy-MM-dd")}");
+                SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[quote_dt]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                Debug.Assert(putOptionDataForDay.Count == 0);
+                SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[quote_dt]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                Debug.Assert(callOptionDataForDay.Count == 0);
+                Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
+
+                using NpgsqlConnection conn = new(connectionString);
+#if NO_CALLS
+                string get_quotes_from_day = $"select * from OptionData where optiontype != 'C' and quotedatetime >= {quote_dt.ToString("yyyy-MM-dd 00:00:00")} and  quotedatetime <= {quote_dt.ToString("yyyy-MM-dd 23:59:59")};";
+#else
+                string get_quotes_from_day = $"select * from OptionData where quotedatetime >= {quote_dt.ToString("yyyy-MM-dd 00:00:00")} and  quotedatetime <= {quote_dt.ToString("yyyy-MM-dd 23:59:59")};";
+
+#endif
+                Npgsql.NpgsqlCommand sqlCommand = new(get_quotes_from_day, conn); // Postgres
+                NpgsqlDataReader reader = sqlCommand.ExecuteReader();
+
+                // Output rows
+                while (reader.Read())
                 {
-                    Console.WriteLine($"Processing file: {zipFileName}");
-                    string fileName = archive.Entries[0].Name;
-                    if (archive.Entries.Count != 1)
-                        Console.WriteLine($"Warning: {zipFileName} contains more than one file ({archive.Entries.Count}). Processing first one: {fileName}");
-                    ZipArchiveEntry zip = archive.Entries[0];
-                    DateTime zipDate = DateTime.Parse(zipFileName.Substring(zipFileName.Length - 14, 10));
-                    SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[zipDate]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
-                    Debug.Assert(putOptionDataForDay.Count == 0);
-                    SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[zipDate]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
-                    Debug.Assert(callOptionDataForDay.Count == 0);
-                    Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
-                    using (StreamReader reader = new StreamReader(zip.Open()))
+                    bool validOption;
+                    OptionData option = null;
+
+                    int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
+                    int numValidOptions = 0;
                     {
-                        bool validOption;
-                        OptionData option = null;
+                        ++rowIndex;
+                        option = new OptionData();
+                        validOption = ParseOption(maxDTEToOpen, reader, option, quote_dt, rowIndex);
+                        if (validOption)
+                            numValidOptions++;
 
-                        // read header
-                        string line;
-                        try
+                        // before creating collections for indexing, we have to make sure:
+                        // 1. if there are SPX and SPXW/SPXQ options for the same expiration, we throw away the SPXW or SPXQ. If there are SPXW
+                        //    and SPXQ options for the same expiration, we throw away the SPXQ 
+                        // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
+                        //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
+                        //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
+                        //    We do this by minor adjustments to "true" delta
+                        List<OptionData> optionList;
+                        bool expirationFound = expirationDictionary.TryGetValue(option.expiration, out optionList);
+                        if (!expirationFound)
                         {
-                            line = reader.ReadLine();
-                            if (line == null)
-                                break;
+                            optionList = new List<OptionData>();
+                            optionList.Add(option);
+                            expirationDictionary.Add(option.expiration, optionList);
                         }
-                        catch (System.IO.InvalidDataException ex)
+                        else
                         {
-                            string errmsg = $"*Error* InvalidDataException reading file {zipFileName} Row 1 Message {ex.Message}";
-                            Console.WriteLine(errmsg);
-                            LogError(errmsg);
-                            break;
-                        }
-
-                        if (!line.StartsWith(expectedHeader))
-                        {
-                            Console.WriteLine($"Warning: file {fileName} does not have expected header: {line}. Line skiped anyways");
-                            Console.WriteLine($"         Expected header: {expectedHeader}");
-                        }
-
-                        int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
-                        int numValidOptions = 0;
-                        while (true)
-                        {
-                            try
+                            OptionData optionInList = optionList.First();
+                            if (option.root == optionInList.root)
+                                optionList.Add(option);
+                            else
                             {
-                                line = reader.ReadLine();
-                                if (line == null)
-                                    break;
-                            }
-                            catch (System.IO.InvalidDataException ex)
-                            {
-                                string errmsg = $"*Error* InvalidDataException reading file {zipFileName} Row {rowIndex + 1} Message {ex.Message}";
-                                Console.WriteLine(errmsg);
-                                LogError(errmsg);
-                                break;
-                            }
-                            ++rowIndex;
-                            option = new OptionData();
-                            option.rowIndex = rowIndex;
-                            validOption = ParseOption(noITMStrikes, maxDTEToOpen, line, option, zipDate, fileName, rowIndex);
-                            if (validOption)
-                            {
-                                numValidOptions++;
+                                if (optionInList.root == "SPX")
+                                    continue; // throw away new SPXW/SPXQ option that has same expiration as existing SPX option
 
-                                // before creating collections for indexing, we have to make sure:
-                                // 1. if there are SPX and SPXW/SPXQ options for the same expiration, we throw away the SPXW or SPXQ. If there are SPXW
-                                //    and SPXQ options for the same expiration, we throw away the SPXQ 
-                                // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
-                                //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
-                                //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
-                                //    We do this by minor adjustments to "true" delta
-                                List<OptionData> optionList;
-                                bool expirationFound = expirationDictionary.TryGetValue(option.expiration, out optionList);
-                                if (!expirationFound)
+                                if (option.root == "SPX" || option.root == "SPXW")
                                 {
-                                    optionList = new List<OptionData>();
+                                    // throw away existing List and replace it with new list of options of root of new option
+                                    optionList.Clear();
                                     optionList.Add(option);
-                                    expirationDictionary.Add(option.expiration, optionList);
-                                }
-                                else
-                                {
-                                    OptionData optionInList = optionList.First();
-                                    if (option.root == optionInList.root)
-                                        optionList.Add(option);
-                                    else
-                                    {
-                                        if (optionInList.root == "SPX")
-                                            continue; // throw away new SPXW/SPXQ option that has same expiration as existing SPX option
-
-                                        if (option.root == "SPX" || option.root == "SPXW") { 
-                                            // throw away existing List and replace it with new list of options of root of new option
-                                            optionList.Clear();
-                                            optionList.Add(option);
-                                        }
-                                    }
                                 }
                             }
                         }
-                        int xxx = 1;
+                    }
+                    int xxx = 1;
+                }
+
+                // now that we've thrown away SPXW options where there was an SPX option with the same expration, we start creating the main two
+                // indexes: StrikeIndex and DeltaIndex, which are both SortedList<int, OptionData>, for each time and expiration for this day.
+
+                // To start, we just create just the StrikeIndex and just add an empty DeltaIndex (SortedList<int, OptionData>)
+                // because of the possibility that two options with different strikes will actually have the same delta. Now...tis shouldn't be the
+                // case, but it might be in the data we read because way out of the money options have "funny" deltas sometimes. We will adjust the
+                // deltas that were read so the it's ALWAYS the case that farther out of the money options have lower deltas
+                foreach (var optionsListKVP in expirationDictionary)
+                    foreach (OptionData option in optionsListKVP.Value)
+                    {
+                        if (option.optionType == LetsBeRational.OptionType.Put)
+                            AddOptionToOptionDataForDay(option, putOptionDataForDay);
+                        else
+                            AddOptionToOptionDataForDay(option, callOptionDataForDay);
                     }
 
-                    // now that we've thrown away SPXW options where there was an SPX option with the same expration, we start creating the main two
-                    // indexes: StrikeIndex and DeltaIndex, which are both SortedList<int, OptionData>, for each time and expiration for this day.
-
-                    // To start, we just create just the StrikeIndex and just add an empty DeltaIndex (SortedList<int, OptionData>)
-                    // because of the possibility that two options with different strikes will actually have the same delta. Now...tis shouldn't be the
-                    // case, but it might be in the data we read because way out of the money options have "funny" deltas sometimes. We will adjust the
-                    // deltas that were read so the it's ALWAYS the case that farther out of the money options have lower deltas
-                    foreach (var optionsListKVP in expirationDictionary)
-                        foreach (OptionData option in optionsListKVP.Value)
-                        {
-                            if (option.optionType == LetsBeRational.OptionType.Put)
-                                AddOptionToOptionDataForDay(option, putOptionDataForDay);
-                            else
-                                AddOptionToOptionDataForDay(option, callOptionDataForDay);
-                        }
-
-                    // now fill in unique deltas
+                // now fill in unique deltas
 #if PARFOR_READDATA
             });
-#else
-                }
 #endif
                 // now 
                 int aa = 1;
@@ -584,51 +538,19 @@ namespace OptionBacktester
             optionDataForDelta.Add(option.delta100, option);
         }
 
-        bool ParseOption(bool noITMStrikes, int maxDTE, string line, OptionData option, DateTime zipDate, string fileName, int linenum)
+        bool ParseOption(int maxDTE, NpgsqlDataReader reader, OptionData option, DateTime quote_dt, int linenum)
         {
             Debug.Assert(option != null);
 
-            string[] fields = line.Split(',');
+            char optionType = reader.GetChar((int)CBOEFields.Root); // TODO: make sure database loader does .Trim().ToUpper();
+            option.optionType = (optionType == 'P') ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
 
-            if (fields[0] != "^SPX")
-                return LogError($"*Error*: underlying_symbol is not ^SPX for file {fileName}, line {linenum}, underlying_symbol {fields[0]}, {line}");
+            option.root = reader.GetString((int)CBOEFields.Root);  // TODO: make sure database loader does Trim().ToUpper();
+            Debug.Assert(option.root == "SPX" || option.root == "SPXW" || option.root == "SPXQ");
 
-            option.root = fields[2].Trim().ToUpper();
-            if (option.root != "SPX" && option.root != "SPXW" && option.root != "SPXQ")
-            {
-                if (option.root == "BSZ" || option.root == "SRO")
-                    return false; // ignore binary options on SPX
-                return LogError($"*Error*: root is not SPX, SPXW, or SPXQ for file {fileName}, line {linenum}, root {option.root}, {line}");
-            }
+            option.dt = reader.GetDateTime((int)CBOEFields.QuoteDateTime);
 
-            string optionType = fields[5].Trim().ToUpper();
-            if (optionType != "P" && optionType != "C")
-                return LogError($"*Error*: option_type is neither 'P' or 'C' for file {fileName}, line {linenum}, root {option.root}, {line}");
-            option.optionType = (optionType == "P") ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
-
-            //row.dt = DateTime.ParseExact(fields[1], "yyyy-MM-dd HH:mm:ss", provider);
-            option.dt = DateTime.Parse(fields[(int)CBOEFields.DateTime]);
-            Debug.Assert(option.dt.Date == zipDate); // you can have many, many options at same date/time (different strikes)
-
-            //
-            // temporarily not interested in option greeks before 10:00:00 and after 15:30:00
-            //
-
-            // not ever interested in options after 16:00:00
-            switch (option.dt.Hour)
-            {
-                case 16:
-                    if (option.dt.Minute > 0)
-                        return false;
-                    break;
-            }
-
-#if NO_CALLS
-            // we're not interested in Calls right now
-            if (option.optionType == LetsBeRational.OptionType.Call)
-                return false;
-#endif
-            option.strike = (int)(float.Parse(fields[(int)CBOEFields.Strike]) + 0.001f); // +.001 to prevent conversion error
+            option.strike = reader.GetInt32((int)CBOEFields.Strike); // +.001 to prevent conversion error
                                                                                          // for now, only conside strikes with even multiples of 25
 #if ONLY25STRIKES
             if (option.strike % 25 != 0)
@@ -637,51 +559,42 @@ namespace OptionBacktester
             if (option.strike < minStrike || option.strike > maxStrike)
                 return false;
 
-            option.underlying = float.Parse(fields[(int)CBOEFields.UnderlyingBid]);
-            if (option.underlying <= 0.0)
-                return LogError($"*Error*: underlying_bid is 0 for file {fileName}, line {linenum}, {line}");
-            if (option.underlying < 500.0)
-                return LogError($"*Error*: underlying_bid is less than 500 for file {fileName}, line {linenum}, {line}");
+            option.underlying = reader.GetFloat((int)CBOEFields.Underlying); // TODO: check that database loadr uses activeUndrlyting
+            Debug.Assert(option.underlying > 500f && option.underlying < 100000f);
 
-            // we're not interested in ITM strikes right now
-            if (noITMStrikes && option.strike >= option.underlying)
-                return false;
-
-            //row.expiration = DateTime.ParseExact(fields[3], "yyyy-mm-dd", provider);
-            option.expiration = DateTime.Parse(fields[(int)CBOEFields.Expiration]);
+            option.expiration = reader.GetDateTime((int)CBOEFields.Expiration);
 
             TimeSpan tsDte = option.expiration.Date - option.dt.Date;
             option.dte = tsDte.Days;
-            if (option.dte < 0)
-                return LogError($"*Error*: quote_datetime is later than expiration for file {fileName}, line {linenum}, {line}");
+            Debug.Assert(option.dte >= 0);
 
             // we're not interested in dte greater than 180 days
             if (option.dte > maxDTE)
                 return false;
 
-            option.bid = float.Parse(fields[(int)CBOEFields.Bid]);
-            if (option.bid < 0f)
-                return LogError($"*Error*: bid is less than 0 for file {fileName}, line {linenum}, bid {option.bid}, {line}");
-            option.ask = float.Parse(fields[(int)CBOEFields.Ask]);
-            if (option.ask < 0f)
-                return LogError($"*Error*: ask is less than 0 for file {fileName}, line {linenum}, ask {option.ask}, {line}"); ;
+            option.bid = reader.GetFloat((int)CBOEFields.Bid);
+            Debug.Assert(option.bid >= 0f);
+            option.ask = reader.GetFloat((int)CBOEFields.Ask);
+            Debug.Assert(option.ask >= 0f);
             option.mid = (0.5f * (option.bid + option.ask));
-#if true
+#if false // check that database loader does this
             if (option.mid == 0)
             {
                 option.iv = option.delta = option.gamma = option.vega = option.rho = 0f;
                 return true; // I keep this option in case it is in a Position
             }
 #endif
-            // do my own computation if dte == 0 or iv == 0 or delta == 0
-            option.iv = float.Parse(fields[(int)CBOEFields.ImpliedVolatility]);
-            option.delta = float.Parse(fields[(int)CBOEFields.Delta]);
-
+            option.iv = reader.GetFloat((int)CBOEFields.ImpliedVolatility);
+            option.delta = reader.GetFloat((int)CBOEFields.Delta);
+            option.theta = reader.GetFloat((int)CBOEFields.Theta);
+            option.gamma = reader.GetFloat((int)CBOEFields.Gamma);
+            option.vega = reader.GetFloat((int)CBOEFields.Vega);
+#if false  // check that database loader does this
             if (option.dte == 0 || option.iv == 0 || option.delta == 0)
             {
                 double dteFraction = option.dte;
                 if (option.dte == 0)
-                    dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9*3600 + 1800) / (390*60); // fraction of 390 minute main session
+                    dteFraction = (option.dt.TimeOfDay.TotalSeconds - 9 * 3600 + 1800) / (390 * 60); // fraction of 390 minute main session
                 double t = dteFraction / 365.0; // days to expiration / days in year
                 double s = option.underlying; // underlying SPX price
                 double K = (double)option.strike; // strike price
@@ -711,55 +624,8 @@ namespace OptionBacktester
             option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
             option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
             option.rho = float.Parse(fields[(int)CBOEFields.Rho]);
-
+#endif
             return true;
-        }
-
-        void ComputeGreeks(OptionData option)
-        {
-            // compute iv and delta of option
-            double t = option.dte / 365.0;
-            double r = 1.0; // 0.01*RateReader.RiskFreeRate(option.dt.Date, option.dte);
-            double d = 2.0; // 0.01*DividendReader.DividendYield(option.dt.Date);
-            option.riskFreeRate = (float)r;
-            option.dividend = (float)d;
-
-            // deep in the money options have iv=0, delta=1
-            if (option.optionType == LetsBeRational.OptionType.Call)
-            {
-                if ((option.strike < ((int)option.underlying) - deepInTheMoneyAmount))
-                {
-                    option.iv = 0.0f;
-                    option.delta100 = 10000;
-                }
-            }
-            else if (option.strike > ((int)option.underlying + deepInTheMoneyAmount))
-            {
-                option.iv = 0.0f;
-                option.delta100 = -10000;
-            }
-            else
-            {
-                option.iv = (float)LetsBeRational.ImpliedVolatility(option.mid, option.underlying, option.strike, t, r, d, option.optionType);
-                if (Double.IsNaN(option.iv))
-                {
-                    int qq = 1;
-                }
-                double delta = LetsBeRational.Delta(option.underlying, option.strike, t, r, option.iv, d, option.optionType);
-                if (Double.IsNaN(delta))
-                {
-                    int qq = 1;
-                }
-                double delta100f = 100.0 * delta;
-                option.delta100 = (int)(10000.0 * delta);
-                if (Math.Abs(option.delta100) > 10000)
-                {
-                    int cc = 1;
-                }
-                Debug.Assert(option.delta100 != -1);
-                Debug.Assert(Math.Abs(option.delta100) <= 10000);
-            }
-            int a = 1;
         }
 
         void Backtest()
