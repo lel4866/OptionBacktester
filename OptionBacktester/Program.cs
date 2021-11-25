@@ -16,11 +16,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Threading.Tasks;
-using LetsBeRationalLib;
 using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
-using ReadFredTreasuryRates;
 using Npgsql; // for postgres
 
 namespace OptionBacktester
@@ -38,9 +36,15 @@ namespace OptionBacktester
         internal string root;
         internal DateTime expiration;
         internal int strike;
-        internal LetsBeRational.OptionType optionType;
+        internal OptionType optionType;
         internal float multiplier = 100f; // converts option prices to dollars
         internal SortedList<DateTime, OptionData> optionData = new SortedList<DateTime, OptionData>();
+    }
+
+    public enum OptionType
+    {
+        Put,
+        Call
     }
 
     class OptionData
@@ -49,7 +53,7 @@ namespace OptionBacktester
         internal DateTime dt;
         internal DateTime expiration;
         internal int strike;
-        internal LetsBeRational.OptionType optionType;
+        internal OptionType optionType;
         internal string root;
         internal float underlying;
         internal float bid;
@@ -117,7 +121,7 @@ namespace OptionBacktester
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
-        internal SortedList<(string, DateTime, int, LetsBeRational.OptionType), (Option, int)> options = new();
+        internal SortedList<(string, DateTime, int, OptionType), (Option, int)> options = new();
 
         internal PositionType positionType; // the original PositionType of the position
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
@@ -251,9 +255,6 @@ namespace OptionBacktester
         const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
         CultureInfo provider = CultureInfo.InvariantCulture;
         StreamWriter errorLog = new StreamWriter(Path.Combine(DataDir, "error_log.txt"));
-
-        FredRateReader rate_reader = new FredRateReader(new DateTime(2013, 1, 1));
-        SP500DividendYieldReader dividend_reader = new SP500DividendYieldReader(new DateTime(2013, 1, 1));
 
         List<Position> positions = new List<Position>();
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
@@ -475,7 +476,7 @@ namespace OptionBacktester
                 foreach (var optionsListKVP in expirationDictionary)
                     foreach (OptionData option in optionsListKVP.Value)
                     {
-                        if (option.optionType == LetsBeRational.OptionType.Put)
+                        if (option.optionType == OptionType.Put)
                             AddOptionToOptionDataForDay(option, putOptionDataForDay);
                         else
                             AddOptionToOptionDataForDay(option, callOptionDataForDay);
@@ -528,7 +529,7 @@ namespace OptionBacktester
                 while (optionDataForDelta.ContainsKey(option.delta100))
                 {
                     //var xxx = optionDataForDelta[option.delta100]; // debug
-                    if (option.optionType == LetsBeRational.OptionType.Put)
+                    if (option.optionType == OptionType.Put)
                         option.delta100--;
                     else
                         option.delta100++;
@@ -543,7 +544,7 @@ namespace OptionBacktester
             Debug.Assert(option != null);
 
             char optionType = reader.GetChar((int)CBOEFields.Root); // TODO: make sure database loader does .Trim().ToUpper();
-            option.optionType = (optionType == 'P') ? LetsBeRational.OptionType.Put : LetsBeRational.OptionType.Call;
+            option.optionType = (optionType == 'P') ? OptionType.Put : OptionType.Call;
 
             option.root = reader.GetString((int)CBOEFields.Root);  // TODO: make sure database loader does Trim().ToUpper();
             Debug.Assert(option.root == "SPX" || option.root == "SPXW" || option.root == "SPXQ");
