@@ -20,6 +20,7 @@ using LetsBeRationalLib;
 using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
+using Npgsql; // for postgres
 
 namespace OptionBacktester
 {
@@ -44,34 +45,34 @@ namespace OptionBacktester
     class OptionData
     {
         //internal Option option;
-        internal int rowIndex;
         internal DateTime dt;
-        internal string root;
         internal DateTime expiration;
         internal int strike;
         internal LetsBeRational.OptionType optionType;
+        internal string root;
+        internal float underlying;
         internal float bid;
         internal float ask;
-        internal float mid;
-        internal float underlying;
-        internal int dte;
-        internal float riskFreeRate;
-        internal float dividend;
         internal float iv;
         internal float delta;
-        // delta100 is delta in percent times 100; int so it makes a good index; so, if delta is read as -0.5 (at the money put), it will have a delta100 of -5000
-        internal int delta100 = -10000;
         internal float gamma;
         internal float theta;
         internal float vega;
         internal float rho;
+        internal int openInterest;
+        internal float riskFreeRate;
+        internal float dividendYield;
+        internal float mid;
+        internal int dte;
+        // delta100 is delta in percent times 100; int so it makes a good index; so, if delta is read as -0.5 (at the money put), it will have a delta100 of -5000
+        internal int delta100 = -10000;
     }
 
     // for reading CBOE Data
     public enum CBOEFields : int
     {
         UnderlyingSymbol,
-        DateTime,
+        QuoteDateTime,
         Root,
         Expiration,
         Strike,
@@ -94,7 +95,8 @@ namespace OptionBacktester
         Gamma,
         Theta,
         Vega,
-        Rho, OpenInterest
+        Rho, 
+        OpenInterest
     }
 
     class Equity
@@ -244,12 +246,14 @@ namespace OptionBacktester
         const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
         const int minStrike = 625;
         const int maxStrike = 10000;
+        const int maxDTE = 200; // for reading data
         const int minDTEToOpen = 150; // for opening a position
         const int maxDTEToOpen = 170; // for opening a position
         const int minPositionDTE = 30;
         const float maxLoss = -2000f;
         const float profitTarget = 1000f;
 
+        const string connectionString = "Host=localhost:5432;Username=postgres;Password=11331ca;Database=CBOEOptionData"; // Postgres
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
         const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
@@ -339,16 +343,49 @@ namespace OptionBacktester
             SortedList<int, Option> mySortList = new SortedList<int, Option>();
             IEnumerable<KeyValuePair<int, Option>> res = mySortList.Where(i => i.Key > 30 && i.Key < 60);
 #endif
+
+#if false
             // CBOEDataShop 15 minute data (900sec); a separate zip file for each day, so, if programmed correctly, we can read each day in parallel
             string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervals_900sec_calcs_oi*.zip", SearchOption.AllDirectories); // filename if you bought greeks
             //string[] zipFileNameArray = Directory.GetFiles(DataDir, "UnderlyingOptionsIntervalsQuotes_900sec*.zip", SearchOption.AllDirectories); // filename if you didn't buy greeks
             Array.Sort(zipFileNameArray);
+#endif
+
 #if false
             // first List is in order of Date; Second List is in order of time of day in fixed 15 minute increments
             // StrikeIndex = SortedList<int, Option> is for updateing existing positions given expiration date and strike
             // DeltaIndex = SortedList<int, Option> is for scanning for new positions given initial dte and initial delta
             List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> OptionData = new List<List<SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>>();
 #endif
+
+            // get first date
+            DateTime first_dt, last_dt;
+            string get_first_date_cmd = "select min(quotedatetime) from OptionData;";
+            string get_last_date_cmd = "select max(quotedatetime) from OptionData;";
+            using (NpgsqlConnection conn1 = new(connectionString))
+            {
+                conn1.Open();
+                Npgsql.NpgsqlCommand sqlCommand1 = new(get_first_date_cmd, conn1); // Postgres
+                first_dt = Convert.ToDateTime(sqlCommand1.ExecuteScalar());
+                Npgsql.NpgsqlCommand sqlCommand2 = new(get_last_date_cmd, conn1); // Postgres
+                last_dt = Convert.ToDateTime(sqlCommand2.ExecuteScalar());
+            }
+
+            // generate a list of weekdays (and exclude holidays)
+            List<DateTime> dt_list = new() { first_dt };
+            int numDays = (last_dt - first_dt).Days;
+            TimeSpan one_day = new TimeSpan(1, 0, 0, 0);
+            DateTime dt = first_dt;
+            while (dt <= last_dt)
+            {
+                if (dt.DayOfWeek != DayOfWeek.Saturday && dt.DayOfWeek != DayOfWeek.Sunday)
+                {
+                    dt_list.Add(dt);
+                }
+                dt = dt.Add(one_day);
+            }
+
+
             // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
             foreach (string zipFileName in zipFileNameArray)
