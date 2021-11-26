@@ -252,9 +252,7 @@ namespace OptionBacktester
         const string connectionString = "Host=localhost:5432;Username=postgres;Password=11331ca;Database=CBOEOptionData"; // Postgres
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
         const float BaseCommission = 0.65f + 0.66f;
-        const string DataDir = @"C:\Users\lel48\CBOEDataShop\SPX";
-        CultureInfo provider = CultureInfo.InvariantCulture;
-        StreamWriter errorLog = new StreamWriter(Path.Combine(DataDir, "error_log.txt"));
+        StreamWriter errorLog = new StreamWriter(@"C:\Users\lel48\VisualStudioProjects\OptionBacktester.cs\error_log.txt");
 
         List<Position> positions = new List<Position>();
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
@@ -367,7 +365,7 @@ namespace OptionBacktester
             }
 
             // generate a list of weekdays (and exclude holidays)
-            List<DateTime> dt_list = new() { first_dt };
+            List<DateTime> dt_list = new();
             int numDays = (last_dt - first_dt).Days;
             TimeSpan one_day = new TimeSpan(1, 0, 0, 0);
             DateTime dt = first_dt;
@@ -383,7 +381,7 @@ namespace OptionBacktester
 
             // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
-            foreach (var quote_dt in dt_list)
+            foreach (var quote_dt in dt_list) 
             {
                 PutOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
                 CallOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
@@ -391,7 +389,7 @@ namespace OptionBacktester
 
             // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
 #if PARFOR_READDATA
-            Parallel.ForEach(dt_list, (quote_dt) =>
+            Parallel.ForEach(dt_list, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (quote_dt) =>
             {
 #else
             foreach (var quote_dt in dt_list)
@@ -405,8 +403,9 @@ namespace OptionBacktester
                 Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
 
                 using NpgsqlConnection conn = new(connectionString);
+                conn.Open();
 #if NO_CALLS
-                string get_quotes_from_day = $"select * from OptionData where optiontype != 'C' and quotedatetime >= {quote_dt.ToString("yyyy-MM-dd 00:00:00")} and  quotedatetime <= {quote_dt.ToString("yyyy-MM-dd 23:59:59")};";
+                string get_quotes_from_day = $"select * from OptionData where optiontype != 'C' and quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
 #else
                 string get_quotes_from_day = $"select * from OptionData where quotedatetime >= {quote_dt.ToString("yyyy-MM-dd 00:00:00")} and  quotedatetime <= {quote_dt.ToString("yyyy-MM-dd 23:59:59")};";
 
@@ -546,7 +545,7 @@ namespace OptionBacktester
             char optionType = reader.GetChar((int)CBOEFields.Root); // TODO: make sure database loader does .Trim().ToUpper();
             option.optionType = (optionType == 'P') ? OptionType.Put : OptionType.Call;
 
-            option.root = reader.GetString((int)CBOEFields.Root);  // TODO: make sure database loader does Trim().ToUpper();
+            option.root = reader.GetString((int)CBOEFields.Root).TrimEnd();  // TODO: make sure database loader does Trim().ToUpper();
             Debug.Assert(option.root == "SPX" || option.root == "SPXW" || option.root == "SPXQ");
 
             option.dt = reader.GetDateTime((int)CBOEFields.QuoteDateTime);
