@@ -378,7 +378,6 @@ namespace OptionBacktester
                 dt = dt.Add(one_day);
             }
 
-
             // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
             foreach (var quote_dt in dt_list) 
@@ -386,7 +385,16 @@ namespace OptionBacktester
                 PutOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
                 CallOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
             }
-
+#if false
+            // pre-compile man data query
+            using (NpgsqlConnection conn = new(connectionString))
+            {
+                conn.Open();
+                const string prepareStmt = "PREPARE get_quotes_query(timestamp, timestamp) AS select * from OptionData where optiontype = 'P' and quotedatetime >= $1 and  quotedatetime <= $2;";
+                Npgsql.NpgsqlCommand sqlPrepareCommand = new(prepareStmt, conn);
+                sqlPrepareCommand.ExecuteNonQuery();
+            }
+#endif
             // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
 #if PARFOR_READDATA
             Parallel.ForEach(dt_list, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (quote_dt) =>
@@ -405,10 +413,15 @@ namespace OptionBacktester
                 using NpgsqlConnection conn = new(connectionString);
                 conn.Open();
 #if NO_CALLS
-                string get_quotes_from_day = $"select * from OptionData where optiontype != 'C' and quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
+                string get_quotes_from_day = $"select * from OptionData where optiontype = 'P' and quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
 #else
-                string get_quotes_from_day = $"select * from OptionData where quotedatetime >= {quote_dt.ToString("yyyy-MM-dd 00:00:00")} and  quotedatetime <= {quote_dt.ToString("yyyy-MM-dd 23:59:59")};";
+                string get_quotes_from_day = $"select * from OptionData where quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
+#endif
 
+#if false
+                // execute pre-compiled data query with parameters for this day
+                string executeStmt = $"EXECUTE get_quotes_query('{quote_dt.ToString("yyyy-MM-dd 00:00:00")}', '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}');";
+                Npgsql.NpgsqlCommand sqlCommand = new(executeStmt, conn); // Postgres
 #endif
                 Npgsql.NpgsqlCommand sqlCommand = new(get_quotes_from_day, conn); // Postgres
                 NpgsqlDataReader reader = sqlCommand.ExecuteReader();
