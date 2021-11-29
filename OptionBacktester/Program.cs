@@ -29,7 +29,6 @@ namespace OptionBacktester
     using Day = DateTime;
     using Time = DateTime;
     using SortedListExtensions;
-    using System.Net.Http;
 
     class Option
     {
@@ -285,7 +284,7 @@ namespace OptionBacktester
 
         void run()
         {
-#if false
+#if false // for debugging
             DateTime optdt = new DateTime(2019, 8, 7);
             DateTime expdt = new DateTime(2019, 8, 9);
             double price = (9.3 + 9.7) / 2.0;
