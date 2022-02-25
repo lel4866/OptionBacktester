@@ -25,15 +25,13 @@ namespace OptionBacktester
 {
     using StrikeIndex = SortedList<int, OptionData>; // index is strike
     using DeltaIndex = SortedList<int, OptionData>; // index is delta*10000, a delta of -0.05 for a put has a delta index of -.05*10000 = -500
-    using ExpirationDate = DateTime;
-    using Day = DateTime;
-    using Time = DateTime;
+    using ExpirationDate = DateOnly;
     using SortedListExtensions;
 
     class Option
     {
         internal string root;
-        internal DateTime expiration;
+        internal DateOnly expiration;
         internal int strike;
         internal OptionType optionType;
         internal float multiplier = 100f; // converts option prices to dollars
@@ -50,7 +48,7 @@ namespace OptionBacktester
     {
         //internal Option option;
         internal DateTime dt;
-        internal DateTime expiration;
+        internal DateOnly expiration;
         internal int strike;
         internal OptionType optionType;
         internal string root;
@@ -120,11 +118,11 @@ namespace OptionBacktester
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
-        internal SortedList<(string, DateTime, int, OptionType), (Option, int)> options = new();
+        internal SortedList<(string, DateOnly, int, OptionType), (Option, int)> options = new();
 
         internal PositionType positionType; // the original PositionType of the position
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
-        internal DateTime entryDate; // so we can easily calculate DTE (days to expiration)
+        internal DateOnly entryDate; // so we can easily calculate DTE (days to expiration)
         internal float entryValue; // net price in dollars of all options in Position at entry
         internal float entryDelta; // net delta of all options in Position at entry
 
@@ -264,8 +262,8 @@ namespace OptionBacktester
         // when we read data, we make sure that for puts, the delta of a smaller strike is less than the delta of a larger strike and,
         //  for calls, the delta of a smaller strike is greater than that of a larger strike
         // We separate this into a collect of days followed by a collection of times so we can read Day data in parallel
-        SortedList<Day, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptions = new();
-        SortedList<Day, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptions = new();
+        SortedList<DateOnly, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptions = new();
+        SortedList<DateOnly, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptions = new();
 
         static void Main(string[] args)
         {
@@ -364,25 +362,25 @@ namespace OptionBacktester
             }
 
             // generate a list of weekdays (and exclude holidays)
-            List<DateTime> dt_list = new();
+            List<DateOnly> date_list = new();
             int numDays = (last_dt - first_dt).Days;
-            TimeSpan one_day = new TimeSpan(1, 0, 0, 0);
-            DateTime dt = first_dt;
-            while (dt <= last_dt)
+            DateOnly last_date = DateOnly.FromDateTime(last_dt);
+            DateOnly date = DateOnly.FromDateTime(first_dt);
+            while (date <= last_date)
             {
-                if (dt.DayOfWeek != DayOfWeek.Saturday && dt.DayOfWeek != DayOfWeek.Sunday)
+                if (date.DayOfWeek != DayOfWeek.Saturday && date.DayOfWeek != DayOfWeek.Sunday)
                 {
-                    dt_list.Add(dt);
+                    date_list.Add(date);
                 }
-                dt = dt.Add(one_day);
+                date = date.AddDays(1);
             }
 
             // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
-            foreach (var quote_dt in dt_list) 
+            foreach (DateOnly quote_date in date_list) 
             {
-                PutOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
-                CallOptions.Add(quote_dt, new SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                PutOptions.Add(quote_date, new SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                CallOptions.Add(quote_date, new SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
             }
 #if false
             // pre-compile man data query
@@ -396,30 +394,31 @@ namespace OptionBacktester
 #endif
             // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
 #if PARFOR_READDATA
-            Parallel.ForEach(dt_list, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (quote_dt) =>
+            Parallel.ForEach(date_list, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (quote_date) =>
             {
 #else
-            foreach (var quote_dt in dt_list)
+            foreach (DateOnly quote_date in date_list)
             {
 #endif
-                Console.WriteLine($"Reading date: {quote_dt.ToString("yyyy-MM-dd")}");
-                SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[quote_dt]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                Console.WriteLine($"Reading date: {quote_date.ToString("yyyy-MM-dd")}");
+                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
                 Debug.Assert(putOptionDataForDay.Count == 0);
-                SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[quote_dt]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
                 Debug.Assert(callOptionDataForDay.Count == 0);
                 Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
 
                 using NpgsqlConnection conn = new(connectionString);
                 conn.Open();
 #if NO_CALLS
-                string get_quotes_from_day = $"select * from OptionData where optiontype = 'P' and quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
+                //string get_quotes_from_day = $"select * from OptionData where optiontype = 'P' and quotedatetime >= '{quote_date.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_date.ToString("yyyy-MM-dd 23:59:59")}';";
+                string get_quotes_from_day = $"select * from OptionData where optiontype = 'P' and quotedatetime >= '{quote_date.ToString("yyyy-MM-dd")} 00:00:00' and quotedatetime <= '{quote_date.ToString("yyyy-MM-dd")} 23:59:59';";
 #else
-                string get_quotes_from_day = $"select * from OptionData where quotedatetime >= '{quote_dt.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}';";
+                string get_quotes_from_day = $"select * from OptionData where quotedatetime >= '{quote_date.ToString("yyyy-MM-dd 00:00:00")}' and  quotedatetime <= '{quote_date.ToString("yyyy-MM-dd 23:59:59")}';";
 #endif
 
 #if false
                 // execute pre-compiled data query with parameters for this day
-                string executeStmt = $"EXECUTE get_quotes_query('{quote_dt.ToString("yyyy-MM-dd 00:00:00")}', '{quote_dt.ToString("yyyy-MM-dd 23:59:59")}');";
+                string executeStmt = $"EXECUTE get_quotes_query('{quote_date.ToString("yyyy-MM-dd 00:00:00")}', '{quote_date.ToString("yyyy-MM-dd 23:59:59")}');";
                 Npgsql.NpgsqlCommand sqlCommand = new(executeStmt, conn); // Postgres
 #endif
                 Npgsql.NpgsqlCommand sqlCommand = new(get_quotes_from_day, conn); // Postgres
@@ -436,7 +435,7 @@ namespace OptionBacktester
                     {
                         ++rowIndex;
                         option = new OptionData();
-                        validOption = ParseOption(maxDTEToOpen, reader, option, quote_dt, rowIndex);
+                        validOption = ParseOption(maxDTEToOpen, reader, option, rowIndex);
                         if (validOption)
                             numValidOptions++;
 
@@ -502,7 +501,7 @@ namespace OptionBacktester
             }
         }
 
-        void AddOptionToOptionDataForDay(OptionData option, SortedList<Time, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
+        void AddOptionToOptionDataForDay(OptionData option, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
         {
             StrikeIndex optionDataForStrike;
             DeltaIndex optionDataForDelta;
@@ -550,7 +549,7 @@ namespace OptionBacktester
             optionDataForDelta.Add(option.delta100, option);
         }
 
-        bool ParseOption(int maxDTE, NpgsqlDataReader reader, OptionData option, DateTime quote_dt, int linenum)
+        bool ParseOption(int maxDTE, NpgsqlDataReader reader, OptionData option, int linenum)
         {
             Debug.Assert(option != null);
 
@@ -574,10 +573,10 @@ namespace OptionBacktester
             option.underlying = reader.GetFloat((int)CBOEFields.Underlying); // TODO: check that database loadr uses activeUndrlyting
             Debug.Assert(option.underlying > 500f && option.underlying < 100000f);
 
-            option.expiration = reader.GetDateTime((int)CBOEFields.Expiration);
+            option.expiration = DateOnly.FromDateTime(reader.GetDateTime((int)CBOEFields.Expiration));
 
-            TimeSpan tsDte = option.expiration.Date - option.dt.Date;
-            option.dte = tsDte.Days;
+            //TimeSpan tsDte = option.expiration - DateOnly.FromDateTime(option.dt);
+            option.dte = option.expiration.DayNumber - DateOnly.FromDateTime(option.dt).DayNumber;
             Debug.Assert(option.dte >= 0);
 
             // we're not interested in dte greater than 180 days
@@ -653,7 +652,7 @@ namespace OptionBacktester
             // start at first date/time of data
             foreach (var keyValuePair in PutOptions)
             {
-                DateTime day = keyValuePair.Key;
+                DateOnly day = keyValuePair.Key;
                 SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = keyValuePair.Value;
                 if (optionDataForDay.Count == 0)
                     Console.WriteLine($"No data for {day.ToString("d")}");
@@ -717,7 +716,7 @@ namespace OptionBacktester
                         {
                             position.closePosition = true;
                         }
-                        else if ((day.Date - position.entryDate.Date).Days < minPositionDTE)
+                        else if ((day.DayNumber - position.entryDate.DayNumber) < minPositionDTE)
                         {
                             // close trade if dte of original trade is too small
                             position.closePosition = true;
@@ -737,8 +736,8 @@ namespace OptionBacktester
 
                     // now select new positions for this date and time
                     // first, just select expirations with 120 to 150 dte
-                    DateTime initialExpirationDate = day.AddDays(minDTEToOpen);
-                    DateTime finalExpirationDate = day.AddDays(maxDTEToOpen);
+                    ExpirationDate initialExpirationDate = day.AddDays(minDTEToOpen);
+                    ExpirationDate finalExpirationDate = day.AddDays(maxDTEToOpen);
 
                     int startIndex = optionDataForTime.IndexOfFirstDateGreaterThanOrEqualTo(initialExpirationDate);
                     int endIndex = optionDataForTime.IndexOfFirstDateLessThanOrEqualTo(finalExpirationDate);
@@ -860,7 +859,7 @@ namespace OptionBacktester
 
             trade.orders.Add(delta25Order);
             position.trades.Add(trade);
-            position.entryDate = opt25.dt;
+            position.entryDate = DateOnly.FromDateTime(opt25.dt);
             positions.Add(position);
 
             return position;
@@ -904,7 +903,7 @@ namespace SortedListExtensions
     using OptionBacktester;
     using StrikeIndex = SortedList<int, OptionBacktester.OptionData>;
     using DeltaIndex = SortedList<int, OptionBacktester.OptionData>;
-    using ExpirationDate = DateTime;
+    using ExpirationDate = DateOnly;
 
     public static class TestSortedListExtensionClass
     {
@@ -914,17 +913,17 @@ namespace SortedListExtensions
             var deltaIndex = new DeltaIndex();
             var list = new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>();
 
-            DateTime d1 = new DateTime(2021, 1, 1);
+            DateOnly d1 = new DateOnly(2021, 1, 1);
             list.Add(d1, (strikeIndex, deltaIndex));
             var i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d1);
             Debug.Assert(i1 == 0);
             i1 = list.IndexOfFirstDateLessThanOrEqualTo(d1);
             Debug.Assert(i1 == 0);
 
-            DateTime d2 = new DateTime(2021, 1, 2);
+            DateOnly d2 = new DateOnly(2021, 1, 2);
             i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d2);
             Debug.Assert(i1 == -1);
-            DateTime d0 = new DateTime(2020, 1, 1);
+            DateOnly d0 = new DateOnly(2020, 1, 1);
             i1 = list.IndexOfFirstDateLessThanOrEqualTo(d0);
             Debug.Assert(i1 == 0);
 
@@ -953,7 +952,7 @@ namespace SortedListExtensions
             while (minIdx < maxIdx)
             {
                 midIdx = (minIdx + maxIdx) / 2;
-                DateTime dt = options.ElementAt(midIdx).Key;
+                DateOnly dt = options.ElementAt(midIdx).Key;
                 if (dt == expirationDate)
                 {
                     return midIdx;
@@ -983,7 +982,7 @@ namespace SortedListExtensions
             while (minIdx < maxIdx)
             {
                 midIdx = (minIdx + maxIdx) / 2;
-                DateTime dt = options.ElementAt(midIdx).Key;
+                DateOnly dt = options.ElementAt(midIdx).Key;
                 if (dt == expirationDate)
                 {
                     return midIdx;
