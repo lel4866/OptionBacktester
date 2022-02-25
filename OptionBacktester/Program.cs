@@ -228,7 +228,7 @@ namespace OptionBacktester
 
 #if false
     class OptionIndexes {
-        Dictionary<ExpirationDate, Dictionary<int, Option>> expiration_strike_index; // for updating existing positions (strike and expiration are known); int is a strike, DateTime is an expiration
+        Dictionary<ExpirationDate, Dictionary<int, Option>> expiration_strike_index; // for updating existing positions (strike and expiration are known); int is a strike
         SortedList<ExpirationDate, SortedList<int, Option>> expiration_delta_index; // for finding new positions by dte and delta (compute initial expiration from lowest dte)
         // sortedList = expirationRange_deltaRange_Index[expiration]; List<Option> lo = sortedList.Where(e => lowerDelta < e.Delta &&| e.Delta < higherDelta);
     }
@@ -262,8 +262,8 @@ namespace OptionBacktester
         // when we read data, we make sure that for puts, the delta of a smaller strike is less than the delta of a larger strike and,
         //  for calls, the delta of a smaller strike is greater than that of a larger strike
         // We separate this into a collect of days followed by a collection of times so we can read Day data in parallel
-        SortedList<DateOnly, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptions = new();
-        SortedList<DateOnly, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptions = new();
+        SortedList<DateOnly, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptions = new();
+        SortedList<DateOnly, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptions = new();
 
         static void Main(string[] args)
         {
@@ -283,8 +283,8 @@ namespace OptionBacktester
         void run()
         {
 #if false // for debugging
-            DateTime optdt = new DateTime(2019, 8, 7);
-            DateTime expdt = new DateTime(2019, 8, 9);
+            DateOnly optdt = new DateOnly(2019, 8, 7);
+            DateOnly expdt = new DateOnly(2019, 8, 9);
             double price = (9.3 + 9.7) / 2.0;
             double d = 0.01 * dividend_reader.DividendYield(optdt); // trailing 12 - month sp500 dividend yield
             int dte = (expdt - optdt).Days;
@@ -324,8 +324,8 @@ namespace OptionBacktester
 
         void ReadDataAndComputeGreeks()
         {
-            // Dictionary<DateTime, float> RiskFreeRate = new Dictionary<DateTime, float>();
-            // Dictionary<DateTime, float> SP500DivYield = new Dictionary<DateTime, float>();
+            // Dictionary<DateOnly, float> RiskFreeRate = new Dictionary<DateOnly, float>();
+            // Dictionary<DateOnly, float> SP500DivYield = new Dictionary<DateOnly, float>();
 
 #if false
             List<string> myList = new List<string>();
@@ -375,12 +375,12 @@ namespace OptionBacktester
                 date = date.AddDays(1);
             }
 
-            // initialize outer List (OptionData), which is ordered by Date, with new empty sub SortedList, sorted by time, for each date
+            // initialize outer List (OptionData), which is ordered by Expiration Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
             foreach (DateOnly quote_date in date_list) 
             {
-                PutOptions.Add(quote_date, new SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
-                CallOptions.Add(quote_date, new SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                PutOptions.Add(quote_date, new SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
+                CallOptions.Add(quote_date, new SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
             }
 #if false
             // pre-compile man data query
@@ -401,9 +401,9 @@ namespace OptionBacktester
             {
 #endif
                 Console.WriteLine($"Reading date: {quote_date.ToString("yyyy-MM-dd")}");
-                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> putOptionDataForDay = PutOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
                 Debug.Assert(putOptionDataForDay.Count == 0);
-                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
+                SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> callOptionDataForDay = CallOptions[quote_date]; // optionDataForDay is 3d List[time][expiration][(strike,delta)]
                 Debug.Assert(callOptionDataForDay.Count == 0);
                 Dictionary<ExpirationDate, List<OptionData>> expirationDictionary = new();
 
@@ -501,17 +501,18 @@ namespace OptionBacktester
             }
         }
 
-        void AddOptionToOptionDataForDay(OptionData option, SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
+        void AddOptionToOptionDataForDay(OptionData option, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
         {
             StrikeIndex optionDataForStrike;
             DeltaIndex optionDataForDelta;
 
-            int indexOfOptionTime = optionDataForDay.IndexOfKey(option.dt);
+            TimeOnly quote_time = TimeOnly.FromDateTime(option.dt);
+            int indexOfOptionTime = optionDataForDay.IndexOfKey(quote_time);
             if (indexOfOptionTime == -1)
             {
                 // first option of day - need to create SortedList for this time and add it to optionDataForDay
-                optionDataForDay.Add(option.dt, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
-                indexOfOptionTime = optionDataForDay.IndexOfKey(option.dt);
+                optionDataForDay.Add(quote_time, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
+                indexOfOptionTime = optionDataForDay.IndexOfKey(quote_time);
             }
 
             // now create the two Index collections (one so we can iterate through strikes, the other so we can iterate through deltas)
@@ -653,7 +654,7 @@ namespace OptionBacktester
             foreach (var keyValuePair in PutOptions)
             {
                 DateOnly day = keyValuePair.Key;
-                SortedList<DateTime, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = keyValuePair.Value;
+                SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay = keyValuePair.Value;
                 if (optionDataForDay.Count == 0)
                     Console.WriteLine($"No data for {day.ToString("d")}");
                 else
