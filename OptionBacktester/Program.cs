@@ -1,8 +1,8 @@
-﻿// This program backtest complex option positions
-// It uses option price data from CBOE Datashop
+﻿// This program backtest complex optionData positions
+// It uses optionData price data from CBOE Datashop
 // it gets SP500 dividend yield data from Quandl
 // It gets Risk Free Interest rates from FRED
-// It uses my modified version of Jaeckel's Lets Be Rational C++ program to compute option greeks
+// It uses my modified version of Jaeckel's Lets Be Rational C++ program to compute optionData greeks
 
 // This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis
 
@@ -14,9 +14,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
-using System.Threading.Tasks;
-using System.Globalization;
 using System.Diagnostics;
 using System.Linq;
 using Npgsql; // for postgres
@@ -24,7 +21,11 @@ using Npgsql; // for postgres
 namespace OptionBacktester
 {
     using StrikeIndex = SortedList<int, OptionData>; // index is strike
-    using DeltaIndex = SortedList<int, OptionData>; // index is delta*10000, a delta of -0.05 for a put has a delta index of -.05*10000 = -500
+
+    // delta index is delta*deltaIndexMultiplier; since delta ca be -1 to 1, deltaIndex can be -10000 to 10000
+    // for a deltaMultiplier of 10000, delta of -0.05 for a put has a delta index of -.05*deltaIndexMultiplier = -500
+    using DeltaIndex = SortedList<int, OptionData>;
+
     using ExpirationDate = DateOnly;
     using SortedListExtensions;
 
@@ -34,8 +35,19 @@ namespace OptionBacktester
         internal DateOnly expiration;
         internal int strike;
         internal OptionType optionType;
-        internal float multiplier = 100f; // converts option prices to dollars
-        internal SortedList<DateTime, OptionData> optionData = new SortedList<DateTime, OptionData>();
+        internal float multiplier = 100f; // converts optionData prices to dollars
+        internal SortedList<DateTime, OptionData> optionDataList = new ();
+
+        internal Option(OptionData optionData)
+        {
+            root = optionData.root;
+            expiration = optionData.expiration;
+            strike = optionData.strike;
+            optionType = optionData.optionType;
+            optionDataList.Add(optionData.dt, optionData);
+
+            optionData.option = this;
+        }
     }
 
     public enum OptionType
@@ -46,7 +58,10 @@ namespace OptionBacktester
 
     class OptionData
     {
-        //internal Option option;
+        internal const float deltaIndexMultiplier = 10000.0f;
+
+        internal Option option; // back pointer into Options collection
+
         internal DateTime dt;
         internal DateOnly expiration;
         internal int strike;
@@ -61,13 +76,12 @@ namespace OptionBacktester
         internal float theta;
         internal float vega;
         internal float rho;
-        internal int openInterest;
-        internal float riskFreeRate;
-        internal float dividendYield;
         internal float mid;
         internal int dte;
-        // delta100 is delta in percent times 100; int so it makes a good index; so, if delta is read as -0.5 (at the money put), it will have a delta100 of -5000
-        internal int delta100 = -10000;
+
+        // deltaIndex is delta*deltaIndexMultiplier cast to an int so it makes a good index;
+        // so, if delta is read as -0.5 (at the money put), and deltaIndexMultiplier is 10000, it will have a deltaIndex of -5000
+        internal int deltaIndex = (int)(-1 * deltaIndexMultiplier); // a delta of -1 becomes a deltaIndex of -10000
     }
 
     // for reading CBOE Data
@@ -113,26 +127,26 @@ namespace OptionBacktester
         CCS
     }
 
-    // a Position represents a multi-legged option position that was opened at a starting date and time
+    // a Position represents a multi-legged optionData position that was opened at a starting date and time
     // The trades field contains the list of adjustments to the initial trade (trade[0]), incuding the final closing of the trade
     class Position
     {
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
-        internal SortedList<(string, DateOnly, int, OptionType), (Option, int)> options = new();
+        internal SortedList<(string root, ExpirationDate expiration, int strike, OptionType type), (Option option, int quantity)> options = new();
 
         internal PositionType positionType; // the original PositionType of the position
         internal List<Trade> trades = new List<Trade>(); // trades[0] contains the initial trade...so the Orders in that trade are the initial position
-        internal DateOnly entryDate; // so we can easily calculate DTE (days to expiration)
+        internal DateTime entryDateTime; // so we can easily calculate DTE (days to expiration)
         internal float entryValue; // net price in dollars of all options in Position at entry
         internal float entryDelta; // net delta of all options in Position at entry
 
         internal float curValue; // internal state use by Backtest() to hold current value of Position in dollars
         internal float curDelta; // internal state used by backtest90 to hold current delta of position.
-        internal bool closePosition; // internal state used by Backtest() function to decide if this position should be removed from this Position's option SortedList
+        internal bool closePosition; // internal state used by Backtest() function to decide if this position should be removed from this Position's optionData SortedList
 
-        // add an option to this Position's options collection if it is not already there.
-        // if it is already there, adjust quantity, and, if quantity now 0, remove it from this Position's option collection
-        // returns false if option quantity became 0
+        // add an Option to this Position's options collection if it is not already there.
+        // if it is already there, adjust quantity, and, if quantity now 0, remove it from this Position's optionData collection
+        // returns false if optionData quantity became 0
         internal bool AddOption(Option option, int quantity)
         {
             Debug.Assert(quantity != 0);
@@ -152,11 +166,11 @@ namespace OptionBacktester
             }
             else
             {
-                // option not in collection - add it
-                options.Add((option.root, option.expiration, option.strike, option.optionType), (option, quantity));
+                // Option not in collection - add it
+                options.Add(key, (option, quantity));
             }
 
-            return true; // option in collection (false meant it was in collection and now isn't because new quatity became 0)
+            return true; // optionData in collection (false meant it was in collection and now isn't because new quatity became 0)
         }
 
         internal virtual void adjust()
@@ -197,7 +211,7 @@ namespace OptionBacktester
         internal TradeType tradeType = TradeType.None;
         internal DateTime dt; // when orders placed and filled (this is a backtest...we assume orsers filled instantly)
         internal float commission; // total commission for all orders in Trade
-        internal List<Order> orders = new List<Order>(); // each order is for a quantity of a single option
+        internal List<Order> orders = new List<Order>(); // each order is for a quantity of a single optionData
     }
 
     enum TradeType
@@ -214,7 +228,7 @@ namespace OptionBacktester
     class Order
     {
         internal OrderType orderType = OrderType.None;
-        internal OptionData option; // reference to option at entry
+        internal OptionData option; // reference to optionData at entry
         internal int quantity;
     }
 
@@ -236,15 +250,23 @@ namespace OptionBacktester
 
     class Program
     {
-        const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider option "deep in the money"
+        const int deepInTheMoneyAmount = 100; // # of SPX points at which we consider optionData "deep in the money"
         const int minStrike = 625;
         const int maxStrike = 10000;
         const int maxDTE = 200; // for reading data
         const int minDTEToOpen = 150; // for opening a position
         const int maxDTEToOpen = 170; // for opening a position
-        const int minPositionDTE = 30;
+        const int maxDIT = 70;
         const float maxLoss = -2000f;
         const float profitTarget = 1000f;
+
+        // these are delta*deltaIndexMultiplier (used to convert float delta into int delta index)
+        const int delta5_minIndex = (int)(.04 * OptionData.deltaIndexMultiplier);
+        const int delta5_maxIndex = (int)(.06 * OptionData.deltaIndexMultiplier);
+        const int delta15_minIndex = (int)(.14 * OptionData.deltaIndexMultiplier);
+        const int delta15_maxIndex = (int)(.16 * OptionData.deltaIndexMultiplier);
+        const int delta25_minIndex = (int)(.24 * OptionData.deltaIndexMultiplier);
+        const int delta25_maxIndex = (int)(.26 * OptionData.deltaIndexMultiplier);
 
         const string connectionString = "Host=localhost:5432;Username=postgres;Password=11331ca;Database=CBOEOptionData"; // Postgres
         const float Slippage = 0.05f; // from mid.. this should probably be dynamic based on current market conditions
@@ -262,6 +284,7 @@ namespace OptionBacktester
         // when we read data, we make sure that for puts, the delta of a smaller strike is less than the delta of a larger strike and,
         //  for calls, the delta of a smaller strike is greater than that of a larger strike
         // We separate this into a collect of days followed by a collection of times so we can read Day data in parallel
+        Dictionary<(OptionType, string root, ExpirationDate, int strike), Option> options = new();
         SortedList<DateOnly, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> PutOptions = new();
         SortedList<DateOnly, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>> CallOptions = new();
 
@@ -269,6 +292,8 @@ namespace OptionBacktester
         {
             // test extensions to SortedList
             // TestSortedListExtensionClass.test();
+            //int[] a = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12};
+            //int idx = find_first_ge(a, 12);
 
             var pgm = new Program();
             pgm.run();
@@ -307,7 +332,7 @@ namespace OptionBacktester
 
             watch.Stop();
             Console.WriteLine($"Time to read data and compute iv,delta: {0.001 * watch.ElapsedMilliseconds / 60.0} minutes");
-            if (true) return;
+            //if (true) return;
 
             watch.Reset();
             watch.Start();
@@ -377,7 +402,7 @@ namespace OptionBacktester
 
             // initialize outer List (OptionData), which is ordered by Expiration Date, with new empty sub SortedList, sorted by time, for each date
             // since that sublist is the thing modified when a zip file is read, we can read in parallel without worrying about locks
-            foreach (DateOnly quote_date in date_list) 
+            foreach (DateOnly quote_date in date_list)
             {
                 PutOptions.Add(quote_date, new SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
                 CallOptions.Add(quote_date, new SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>>());
@@ -392,7 +417,7 @@ namespace OptionBacktester
                 sqlPrepareCommand.ExecuteNonQuery();
             }
 #endif
-            // now read actual option data from each zip file (we have 1 zip file per day), row by row, and add it to SortedList for that date
+            // now read actual optionData data from postgres, and add it to SortedList for that date
 #if PARFOR_READDATA
             Parallel.ForEach(date_list, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (quote_date) =>
             {
@@ -424,59 +449,69 @@ namespace OptionBacktester
                 Npgsql.NpgsqlCommand sqlCommand = new(get_quotes_from_day, conn); // Postgres
                 NpgsqlDataReader reader = sqlCommand.ExecuteReader();
 
-                // Output rows
+                bool validOption;
+                int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
+                int numValidOptions = 0;
                 while (reader.Read())
                 {
-                    bool validOption;
-                    OptionData option = null;
+                    ++rowIndex;
 
-                    int rowIndex = 1; // header was row 0, but will be row 1 if we look at data in Excel
-                    int numValidOptions = 0;
+                    OptionData optionData = new OptionData();
+                    validOption = ParseOption(maxDTEToOpen, reader, optionData, rowIndex);
+                    if (!validOption)
+                        continue;
+                    numValidOptions++;
+
+                    // before creating collections for indexing, we have to make sure:
+                    // 1. if there are SPX and SPXW/SPXQ options for the same expiration, we throw away the SPXW or SPXQ. If there are SPXW
+                    //    and SPXQ options for the same expiration, we throw away the SPXQ 
+                    // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
+                    //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
+                    //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
+                    //    We do this by minor adjustments to "true" delta
+                    List<OptionData> optionList;
+                    bool expirationFound = expirationDictionary.TryGetValue(optionData.expiration, out optionList);
+                    if (!expirationFound)
                     {
-                        ++rowIndex;
-                        option = new OptionData();
-                        validOption = ParseOption(maxDTEToOpen, reader, option, rowIndex);
-                        if (validOption)
-                            numValidOptions++;
-
-                        // before creating collections for indexing, we have to make sure:
-                        // 1. if there are SPX and SPXW/SPXQ options for the same expiration, we throw away the SPXW or SPXQ. If there are SPXW
-                        //    and SPXQ options for the same expiration, we throw away the SPXQ 
-                        // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
-                        //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
-                        //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
-                        //    We do this by minor adjustments to "true" delta
-                        List<OptionData> optionList;
-                        bool expirationFound = expirationDictionary.TryGetValue(option.expiration, out optionList);
-                        if (!expirationFound)
-                        {
-                            optionList = new List<OptionData>();
-                            optionList.Add(option);
-                            expirationDictionary.Add(option.expiration, optionList);
-                        }
+                        optionList = new List<OptionData>();
+                        optionList.Add(optionData);
+                        expirationDictionary.Add(optionData.expiration, optionList);
+                    }
+                    else
+                    {
+                        OptionData optionInList = optionList.First();
+                        if (optionData.root == optionInList.root)
+                            optionList.Add(optionData);
                         else
                         {
-                            OptionData optionInList = optionList.First();
-                            if (option.root == optionInList.root)
-                                optionList.Add(option);
-                            else
-                            {
-                                if (optionInList.root == "SPX")
-                                    continue; // throw away new SPXW/SPXQ option that has same expiration as existing SPX option
+                            if (optionInList.root == "SPX")
+                                continue; // throw away new SPXW/SPXQ optionData that has same expiration as existing SPX optionData
 
-                                if (option.root == "SPX" || option.root == "SPXW")
-                                {
-                                    // throw away existing List and replace it with new list of options of root of new option
-                                    optionList.Clear();
-                                    optionList.Add(option);
-                                }
+                            if (optionData.root == "SPX" || optionData.root == "SPXW")
+                            {
+                                // throw away existing List and replace it with new list of options of root of new optionData
+                                optionList.Clear();
+                                optionList.Add(optionData);
                             }
                         }
                     }
+
+                    // now add option part of optionData to main options dictionary if not already there
+                    // if it is already there, just add optionData to Options's optionDataList
+                    var key = (optionData.optionType, optionData.root, optionData.expiration, optionData.strike);
+                    bool found = options.TryGetValue(key, out Option option);
+                    if (!found)
+                        options.Add(key, new Option(optionData)); // constructor adds optionData to new Option's optionDataList
+                    else
+                    {
+                        optionData.option = option;
+                        option.optionDataList.Add(optionData.dt, optionData);
+                    }
+
                     int xxx = 1;
                 }
 
-                // now that we've thrown away SPXW options where there was an SPX option with the same expration, we start creating the main two
+                // now that we've thrown away SPXW options where there was an SPX optionData with the same expration, we start creating the main two
                 // indexes: StrikeIndex and DeltaIndex, which are both SortedList<int, OptionData>, for each time and expiration for this day.
 
                 // To start, we just create just the StrikeIndex and just add an empty DeltaIndex (SortedList<int, OptionData>)
@@ -484,33 +519,34 @@ namespace OptionBacktester
                 // case, but it might be in the data we read because way out of the money options have "funny" deltas sometimes. We will adjust the
                 // deltas that were read so the it's ALWAYS the case that farther out of the money options have lower deltas
                 foreach (var optionsListKVP in expirationDictionary)
-                    foreach (OptionData option in optionsListKVP.Value)
+                {
+                    foreach (OptionData optionData in optionsListKVP.Value)
                     {
-                        if (option.optionType == OptionType.Put)
-                            AddOptionToOptionDataForDay(option, putOptionDataForDay);
+                        if (optionData.optionType == OptionType.Put)
+                            AddOptionDataToOptionDataForDay(optionData, putOptionDataForDay);
                         else
-                            AddOptionToOptionDataForDay(option, callOptionDataForDay);
+                            AddOptionDataToOptionDataForDay(optionData, callOptionDataForDay);
                     }
-
-                // now fill in unique deltas
+                }
 #if PARFOR_READDATA
             });
 #endif
                 // now 
                 int aa = 1;
             }
+            int bb = 1;
         }
 
-        void AddOptionToOptionDataForDay(OptionData option, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
+        void AddOptionDataToOptionDataForDay(OptionData optionData, SortedList<TimeOnly, SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>> optionDataForDay)
         {
             StrikeIndex optionDataForStrike;
             DeltaIndex optionDataForDelta;
 
-            TimeOnly quote_time = TimeOnly.FromDateTime(option.dt);
+            TimeOnly quote_time = TimeOnly.FromDateTime(optionData.dt);
             int indexOfOptionTime = optionDataForDay.IndexOfKey(quote_time);
             if (indexOfOptionTime == -1)
             {
-                // first option of day - need to create SortedList for this time and add it to optionDataForDay
+                // first optionData of day - need to create SortedList for this time and add it to optionDataForDay
                 optionDataForDay.Add(quote_time, new SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)>());
                 indexOfOptionTime = optionDataForDay.IndexOfKey(quote_time);
             }
@@ -519,12 +555,12 @@ namespace OptionBacktester
             (StrikeIndex, DeltaIndex) optionDataForExpiration;
             var optionDataForTime = optionDataForDay.ElementAt(indexOfOptionTime).Value;
 
-            bool expirationFound = optionDataForTime.TryGetValue(option.expiration, out optionDataForExpiration);
+            bool expirationFound = optionDataForTime.TryGetValue(optionData.expiration, out optionDataForExpiration);
             if (!expirationFound)
             {
                 optionDataForStrike = new StrikeIndex();
                 optionDataForDelta = new DeltaIndex();
-                optionDataForTime.Add(option.expiration, (optionDataForStrike, optionDataForDelta));
+                optionDataForTime.Add(optionData.expiration, (optionDataForStrike, optionDataForDelta));
             }
             else
             {
@@ -532,29 +568,28 @@ namespace OptionBacktester
                 Debug.Assert(optionDataForStrike != null);
                 optionDataForDelta = optionDataForExpiration.Item2;
                 Debug.Assert(optionDataForStrike != null);
-                if (optionDataForStrike.ContainsKey(option.strike))
+                if (optionDataForStrike.ContainsKey(optionData.strike))
                 {
-                    Console.WriteLine($"Duplicate Strike at {option.dt}: expiration={option.expiration}, strike={option.strike}, ");
+                    Console.WriteLine($"Duplicate Strike at {optionData.dt}: expiration={optionData.expiration}, strike={optionData.strike}, ");
                     return;
                 }
-                while (optionDataForDelta.ContainsKey(option.delta100))
+                while (optionDataForDelta.ContainsKey(optionData.deltaIndex))
                 {
-                    //var xxx = optionDataForDelta[option.delta100]; // debug
-                    if (option.optionType == OptionType.Put)
-                        option.delta100--;
+                    if (optionData.optionType == OptionType.Put)
+                        optionData.deltaIndex--;
                     else
-                        option.delta100++;
+                        optionData.deltaIndex++;
                 }
             }
-            optionDataForStrike.Add(option.strike, option);
-            optionDataForDelta.Add(option.delta100, option);
+            optionDataForStrike.Add(optionData.strike, optionData);
+            optionDataForDelta.Add(optionData.deltaIndex, optionData);
         }
 
         bool ParseOption(int maxDTE, NpgsqlDataReader reader, OptionData option, int linenum)
         {
             Debug.Assert(option != null);
 
-            char optionType = reader.GetChar((int)CBOEFields.Root); // TODO: make sure database loader does .Trim().ToUpper();
+            char optionType = reader.GetChar((int)CBOEFields.OptionType); // TODO: make sure database loader does .Trim().ToUpper();
             option.optionType = (optionType == 'P') ? OptionType.Put : OptionType.Call;
 
             option.root = reader.GetString((int)CBOEFields.Root).TrimEnd();  // TODO: make sure database loader does Trim().ToUpper();
@@ -563,7 +598,7 @@ namespace OptionBacktester
             option.dt = reader.GetDateTime((int)CBOEFields.QuoteDateTime);
 
             option.strike = reader.GetInt32((int)CBOEFields.Strike); // +.001 to prevent conversion error
-                                                                                         // for now, only conside strikes with even multiples of 25
+                                                                     // for now, only conside strikes with even multiples of 25
 #if ONLY25STRIKES
             if (option.strike % 25 != 0)
                 return false;
@@ -576,7 +611,7 @@ namespace OptionBacktester
 
             option.expiration = DateOnly.FromDateTime(reader.GetDateTime((int)CBOEFields.Expiration));
 
-            //TimeSpan tsDte = option.expiration - DateOnly.FromDateTime(option.dt);
+            //TimeSpan tsDte = optionData.expiration - DateOnly.FromDateTime(optionData.dt);
             option.dte = option.expiration.DayNumber - DateOnly.FromDateTime(option.dt).DayNumber;
             Debug.Assert(option.dte >= 0);
 
@@ -598,6 +633,7 @@ namespace OptionBacktester
 #endif
             option.iv = reader.GetFloat((int)CBOEFields.ImpliedVolatility);
             option.delta = reader.GetFloat((int)CBOEFields.Delta);
+            option.deltaIndex = (int)(option.delta * 100000.0);
             option.theta = reader.GetFloat((int)CBOEFields.Theta);
             option.gamma = reader.GetFloat((int)CBOEFields.Gamma);
             option.vega = reader.GetFloat((int)CBOEFields.Vega);
@@ -615,7 +651,7 @@ namespace OptionBacktester
 
                 option.iv = (float)LetsBeRational.ImpliedVolatility((double)option.mid, s, K, t, r, q, LetsBeRational.OptionType.Put);
                 option.delta = (float)LetsBeRational.Delta(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
-                option.delta100 = (int)(option.delta * 10000.0f);
+                option.deltaIndex = (int)(option.delta * deltaIndexMultiplier);
                 option.theta = (float)LetsBeRational.Theta(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
                 option.gamma = (float)LetsBeRational.Gamma(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
                 option.vega = (float)LetsBeRational.Vega(s, K, t, r, option.iv, q, LetsBeRational.OptionType.Put);
@@ -631,7 +667,7 @@ namespace OptionBacktester
                 return LogError($"*Error*: absolute value of delta is equal to 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
             if (Math.Abs(option.delta) > 1f)
                 return LogError($"*Error*: absolute value of delta is greater than 1 for file {fileName}, line {linenum}, delta {option.delta}, {line}"); ;
-            option.delta100 = (int)(option.delta * 10000.0f);
+            option.deltaIndex = (int)(option.delta * deltaIndexMultiplier);
             option.gamma = float.Parse(fields[(int)CBOEFields.Gamma]);
             option.theta = float.Parse(fields[(int)CBOEFields.Theta]);
             option.vega = float.Parse(fields[(int)CBOEFields.Vega]);
@@ -664,9 +700,9 @@ namespace OptionBacktester
                 {
                     SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> optionDataForTime = sortedListForTime.Value;
                     Debug.Assert(optionDataForTime.Count > 0);
-                    var i1 = optionDataForTime.Values[0].Item1; // StrikeIndex is a SortedList<int, optionData>
-                    Debug.Assert(i1.Count > 0);
-                    DateTime curDateTime = i1.Values[0].dt;
+                    var item1 = optionDataForTime.Values[0].Item1; // StrikeIndex is a SortedList<int, optionData>
+                    Debug.Assert(item1.Count > 0);
+                    DateTime curDateTime = item1.Values[0].dt;
                     Console.WriteLine($"Testing at {curDateTime.ToString("HH.mm")}");
 
                     // loop through all exisiting positions, update their values, and see if they need to be adjusted or closed
@@ -682,13 +718,12 @@ namespace OptionBacktester
                         position.curValue = 0.0f;
                         position.curDelta = 0;
 
-                        // new way
                         foreach (var kv in position.options)
                         {
                             var (option, quantity) = kv.Value;
-                            OptionData curOption = option.optionData[curDateTime];
+                            OptionData curOption = option.optionDataList[curDateTime];
                             position.curValue += quantity * curOption.mid * option.multiplier; // a negative value means a credit
-                            position.curDelta += quantity * curOption.delta100 * 0.01f;
+                            position.curDelta += quantity * curOption.deltaIndex * 0.01f;
                         }
 #if false
                         /// old way
@@ -702,13 +737,14 @@ namespace OptionBacktester
                                 (StrikeIndex, DeltaIndex) optionsForExpirationDate = optionDataForTime[entry_option.expiration];
                                 OptionData curOption = optionsForExpirationDate.Item1[entry_option.strike];
                                 position.curValue += order.quantity * curOption.mid * 100.0f; // a negative value means a credit
-                                position.curDelta += order.quantity * curOption.delta100*0.01f;
+                                position.curDelta += order.quantity * curOption.delta;
                             }
                         }
 #endif
                         // see if we need to close or adjust position
-                        // first check the things that all option positions must check: maxLoss, profitTarget, minPositionDTE
+                        // first check the things that all optionData positions must check: maxLoss, profitTarget, minPositionDTE
                         float pl = position.curValue - position.entryValue;
+                        int dit = day.DayNumber - DateOnly.FromDateTime(position.entryDateTime).DayNumber;
                         if (pl < maxLoss)
                         {
                             position.closePosition = true;
@@ -717,7 +753,7 @@ namespace OptionBacktester
                         {
                             position.closePosition = true;
                         }
-                        else if ((day.DayNumber - position.entryDate.DayNumber) < minPositionDTE)
+                        else if (dit > maxDIT)
                         {
                             // close trade if dte of original trade is too small
                             position.closePosition = true;
@@ -760,7 +796,7 @@ namespace OptionBacktester
                                 continue;
 
                             // DeltaIndex is a SortedList<int, Option)
-                            // each element of deltaList is a <Key, Value> pair, with the key being the delta and the value being the option
+                            // each element of deltaList is a <Key, Value> pair, with the key being the delta and the value being the optionData
                             DeltaIndex strikeByDeltaList = indexPair.Item2;
                             FindSTTBWBs(strikeByDeltaList);
                         }
@@ -774,22 +810,22 @@ namespace OptionBacktester
         {
 
             // DeltaIndex is a SortedList<int, Option)
-            // each element of deltaList is a <Key, Value> pair, with the key being the delta and the value being the option
+            // each element of deltaList is a <Key, Value> pair, with the key being the delta and the value being the optionData
 
             // find delta of -4  to -6
-            var deltaList5 = strikeByDeltaList.Where(e => e.Key <= -400 && e.Key >= -600);
+            var deltaList5 = strikeByDeltaList.Where(e => e.Key <= -delta5_minIndex && e.Key >= -delta5_maxIndex);
             Int32 deltaList5Count = deltaList5.Count();
             if (deltaList5.Count() == 0)
                 return;
 
-            // find delta of -13 to -16
-            var deltaList15 = strikeByDeltaList.Where(e => e.Key <= -1300 && e.Key >= -1600);
+            // find delta of -14 to -16
+            var deltaList15 = strikeByDeltaList.Where(e => e.Key <= -delta15_minIndex && e.Key >= -delta15_maxIndex);
             Int32 deltaList15Count = deltaList15.Count();
             if (deltaList15.Count() == 0)
                 return;
 
-            // find delta of -23 to -26
-            var deltaList25 = strikeByDeltaList.Where(e => e.Key <= -2300 && e.Key >= -2600);
+            // find delta of -24 to -26
+            var deltaList25 = strikeByDeltaList.Where(e => e.Key <= -delta25_minIndex && e.Key >= -delta25_maxIndex);
             Int32 deltaList25Count = deltaList25.Count();
             if (deltaList25.Count() == 0)
                 return;
@@ -797,73 +833,125 @@ namespace OptionBacktester
             foreach (var delta25kv in deltaList25)
             {
                 OptionData opt25 = delta25kv.Value;
-                int opt25Delta = opt25.delta100;
                 foreach (var delta15kv in deltaList15)
                 {
                     OptionData opt15 = delta15kv.Value;
-                    int opt15Delta = opt15.delta100;
                     foreach (var delta5kv in deltaList5)
                     {
                         OptionData opt5 = delta5kv.Value;
-                        int opt5Delta = opt5.delta100;
 
-                        // calculate total delta, cost
-                        float totalDelta = (4 * opt25Delta - 8 * opt15Delta + 4 * opt5Delta) * .01f;
-                        //float totalCostNoSlippage = (-4 * opt25.mid + 8 * opt15.mid - 4 * opt5.mid) * 100.0f;
+                        // calculate total delta
+                        int iTranchMultiplier = STTBWBTranchMultiplier(opt25.underlying); // 1, 2, 3...
+                        float totalDelta = iTranchMultiplier * (1 * opt25.delta - 2 * opt15.delta + 2 * opt5.delta);
 
-                        // only create Trade if delta between -0.5 and 0.5
-                        if (totalDelta <= 0.5 && totalDelta >= -0.5)
-                        {
-                            Position position = AddSTTBWB(opt5, opt15, opt25);
-                            int yqrs = 1;
-                        }
+                        // only create Trade if delta between -1.5 and 1.5
+                        if (totalDelta <= 0.015f && totalDelta >= -0.015f)
+                            AddSTTBWB(opt5, opt15, opt25, totalDelta, iTranchMultiplier);
                     }
                 }
             }
         }
 
-        Position AddSTTBWB(OptionData opt5, OptionData opt15, OptionData opt25)
+        // this determines whether we purchase 1-2-1, 2-4-2, 3-6-3, or 4-8-4; based on magnitude of underlying (larger means fewer options)
+        int STTBWBTranchMultiplier(float underlying)
         {
-            float totalDelta = (4 * opt25.delta100 - 8 * opt15.delta100 + 4 * opt5.delta100) * .01f;
-            float value = (4 * opt25.mid - 8 * opt15.mid + 4 * opt5.mid) * 100f; // a negative value means a credit
-            float commission = 16f * BaseCommission;
-            float slippage = 16 * Slippage * 100.0f;
-            float costs = slippage + commission;
+            return 5 - (int)(underlying / 1500f);
+        }
+
+        void AddSTTBWB(OptionData opt5, OptionData opt15, OptionData opt25, float totalDelta, int iTranchMultiplier)
+        {
+            int ULQuantity = 1 * iTranchMultiplier;
+            int SSQuantity = -2 * ULQuantity;
+            int LLQuantity = 1 * ULQuantity;
+            float fTranchMultiplier = (float)iTranchMultiplier;
+            float value = fTranchMultiplier * (opt25.mid - 2f * opt15.mid + opt5.mid) * 100f; // a negative value means a credit
+            float commission = fTranchMultiplier * 4f * BaseCommission;
+            //float slippage = 4 * fTranchMultiplier * Slippage * 100.0f;
+            //float costs = slippage + commission;
 
             Position position = new Position();
             position.positionType = PositionType.STTBWB;
             position.entryDelta = position.curDelta = totalDelta;
             position.entryValue = position.curValue = value;
 
+            position.entryDateTime = opt25.dt;
+            position.AddOption(opt5.option, LLQuantity);
+            position.AddOption(opt15.option, SSQuantity);
+            position.AddOption(opt25.option, ULQuantity);
+            positions.Add(position);
+
             Trade trade = new Trade();
             trade.tradeType = TradeType.BrokenWingButterfly;
             trade.dt = opt5.dt;
             trade.orders = new List<Order>();
             trade.commission = commission;
+            position.trades.Add(trade);
 
             Order delta5Order = new Order();
             delta5Order.orderType = OrderType.Put;
-            delta5Order.quantity = 4;
+            delta5Order.quantity = LLQuantity;
             delta5Order.option = opt5;
             trade.orders.Add(delta5Order);
 
             Order delta15Order = new Order();
             delta15Order.orderType = OrderType.Put;
-            delta15Order.quantity = -8;
+            delta15Order.quantity = SSQuantity;
             delta15Order.option = opt15;
             trade.orders.Add(delta15Order);
 
             Order delta25Order = new Order();
             delta25Order.orderType = OrderType.Put;
-            delta25Order.quantity = 4;
+            delta25Order.quantity = ULQuantity;
             delta25Order.option = opt25;
-
             trade.orders.Add(delta25Order);
-            position.trades.Add(trade);
-            position.entryDate = DateOnly.FromDateTime(opt25.dt);
-            positions.Add(position);
+        }
 
-            return position;
+        // only for debugging IndexOfFirstDateLessThanOrEqualTo
+        // actually finds first element greater than target and returns previous element
+        public static int find_first_le(int[] a, int target)
+        {
+            int st = 0;
+            int end = a.Length - 1;
+            while (st <= end)
+            {
+                int mid = (st + end) / 2;
+                if (a[mid] == target)
+                    return mid;
+                if (a[mid] < target)
+                {
+                    st = mid + 1;
+                }
+                else
+                { // mid > target
+                    end = mid - 1;
+                }
+            }
+            return st - 1; // or return end + 1
+        }
+
+        // only for debugging IndexOfFirstDateGreaterThanOrEqualTo
+        public static int find_first_ge(int[] a, int target)
+        {
+            int st = 0;
+            int end = a.Length - 1;
+            while (st <= end)
+            {
+                int mid = (st + end) / 2;
+                if (a[mid] == target)
+                    return mid;
+                if (a[mid] < target)
+                {
+                    st = mid + 1;
+                }
+                else
+                { // mid > target
+                    end = mid - 1;
+                }
+            }
+            Debug.Assert(st <= a.Length);
+            if (st == a.Length)
+                return -1;
+            return st;
         }
     }
 
@@ -933,26 +1021,21 @@ namespace SortedListExtensions
             Debug.Assert(i1 == 1);
             i1 = list.IndexOfFirstDateGreaterThanOrEqualTo(d1);
             Debug.Assert(i1 == 0);
-
-            int xx = 1;
         }
     }
 
     public static class SortedListExtensionClass
-    {
-        internal static int IndexOfFirstDateGreaterThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate expirationDate)
+    {    
+    internal static int IndexOfFirstDateGreaterThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate expirationDate)
         {
             Debug.Assert(options.Count > 0);
             int minIdx = 0;
-            int midIdx;
             int maxIdx = options.Count - 1;
 
-            if (maxIdx == 0)
-                return (options.First().Key >= expirationDate) ? 0 : -1;
-
-            while (minIdx < maxIdx)
+            // in each iteration of loop we increase minIdx or decrease maxIdx
+            while (minIdx <= maxIdx)
             {
-                midIdx = (minIdx + maxIdx) / 2;
+                int midIdx = (minIdx + maxIdx) / 2;
                 DateOnly dt = options.ElementAt(midIdx).Key;
                 if (dt == expirationDate)
                 {
@@ -964,41 +1047,43 @@ namespace SortedListExtensions
                 }
                 else // dt > expirationDate
                 {
-                    maxIdx = midIdx;
+                    maxIdx = midIdx - 1;
                 }
             }
+            Debug.Assert(minIdx <= options.Count);
+            if (minIdx == options.Count)
+                return -1;
             return minIdx;
         }
 
+        // returns index of first option in options whose expiration date is less than or equal to specified expirationDate
         internal static int IndexOfFirstDateLessThanOrEqualTo(this SortedList<ExpirationDate, (StrikeIndex, DeltaIndex)> options, ExpirationDate expirationDate)
         {
             Debug.Assert(options.Count > 0);
             int minIdx = 0;
-            int midIdx;
             int maxIdx = options.Count - 1;
 
-            if (maxIdx == 0)
-                return (options.First().Key <= expirationDate) ? 0 : -1;
-
-            while (minIdx < maxIdx)
+            // in each iteration of loop we increase minIdx or decrease maxIdx
+            while (minIdx <= maxIdx)
             {
-                midIdx = (minIdx + maxIdx) / 2;
+                int midIdx = (minIdx + maxIdx) / 2;
                 DateOnly dt = options.ElementAt(midIdx).Key;
                 if (dt == expirationDate)
                 {
                     return midIdx;
                 }
-                if (dt > expirationDate)
+                if (dt < expirationDate)
                 {
+
+                    minIdx = midIdx + 1;
+                }
+                else // dt > expirationDate
+                {
+
                     maxIdx = midIdx - 1;
                 }
-                else // dt < expirationDate
-                {
-                    minIdx = midIdx;
-                }
             }
-            Debug.Assert(minIdx == maxIdx);
-            return minIdx;
+            return minIdx - 1; // could be -1 if there is no element less than or equal to expirationDate
         }
     }
 }
