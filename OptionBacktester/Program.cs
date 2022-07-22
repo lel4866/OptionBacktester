@@ -475,7 +475,10 @@ namespace OptionBacktester
 
                     // before creating collections for indexing, we have to make sure:
                     // 1. if there are SPX and SPXW/SPXQ options for the same expiration, we throw away the SPXW or SPXQ. If there are SPXW
-                    //    and SPXQ options for the same expiration, we throw away the SPXQ 
+                    //    and SPXQ options for the same expiration, we throw away the SPXQ
+                    //    But...here's the problem. If we open a position in SPXQ, we might end up throwing away later values of that option.
+                    //    This happened apparently with SPXQ 100 Put exp 9/30/2014, where we saved data only through 7/2/2014, and threw it away
+                    //    Afterwards
                     // 2. If there are options with the same expiration but different strikes, but with the same delta, we adjust delta so that
                     //    if a call, the delta of the higher strike is strictly less than the delta of of a lower strike, and 
                     //    if a put, the delta of the higher strike is strictly greater than the delta of a lower strike.
@@ -492,11 +495,41 @@ namespace OptionBacktester
                     {
                         OptionData optionInList = optionList.First();
                         if (optionData.root == optionInList.root)
+                        {
                             optionList.Add(optionData);
+#if false
+                            // debug possible issue of throwing away some of SPXQ data after a certain date time
+                            if (optionData.root == "SPXQ")
+                            {
+                                if ((optionData.optionType == OptionType.Put) && (optionData.strike == 1100) && (optionData.expiration == new DateOnly(2014, 9, 30)))
+                                {
+                                    if (DateOnly.FromDateTime(optionData.dt) == new DateOnly(2014, 7, 2))
+                                    {
+                                        int abc = 1;
+                                    }
+                                }
+                            }
+#endif
+                        }
                         else
                         {
                             if (optionInList.root == "SPX")
+                            {
+#if false
+                                // debug possible issue of throwing away some of SPXQ data after a certain date time
+                                if (optionData.root == "SPXQ")
+                                {
+                                    if ((optionData.optionType == OptionType.Put) && (optionData.strike == 1100) && (optionData.expiration == new DateOnly(2014, 9, 30)))
+                                    {
+                                        if (DateOnly.FromDateTime(optionData.dt) == new DateOnly(2014, 7, 3))
+                                        {
+                                            int abc = 1;
+                                        }
+                                    }
+                                }
+#endif
                                 continue; // throw away new SPXW/SPXQ optionData that has same expiration as existing SPX optionData
+                            }
 
                             if (optionData.root == "SPX" || optionData.root == "SPXW")
                             {
