@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using Npgsql; // for postgres
 
 namespace OptionBacktester
@@ -28,6 +29,8 @@ namespace OptionBacktester
 
     using ExpirationDate = DateOnly;
     using SortedListExtensions;
+    using System.Collections.Concurrent;
+    using System.Threading;
 
     class Option
     {
@@ -129,8 +132,9 @@ namespace OptionBacktester
 
     // a Position represents a multi-legged optionData position that was opened at a starting date and time
     // The trades field contains the list of adjustments to the initial trade (trade[0]), incuding the final closing of the trade
-    class Position
+    class Position : IEqualityComparer<Position>
     {
+        internal static int positionId = 0; // only increment with InterlockedIncrement(ref positionKey)
         // currently held options with key of (root, expiration, strike, type); each (Option, int) is a reference to an Option, and the quantity in the position
         internal SortedList<(string root, ExpirationDate expiration, int strike, OptionType type), (Option option, int quantity)> options = new();
 
@@ -140,9 +144,9 @@ namespace OptionBacktester
         internal float entryValue; // net price in dollars of all options in Position at entry
         internal float entryDelta; // net delta of all options in Position at entry
 
+        internal DateTime curDateTime; // so we can easily calculate final value of position
         internal float curValue; // internal state use by Backtest() to hold current value of Position in dollars
-        internal float curDelta; // internal state used by backtest90 to hold current delta of position.
-        internal bool closePosition; // internal state used by Backtest() function to decide if this position should be removed from this Position's optionData SortedList
+        internal float curDelta; // internal state used by backtest() to hold current delta of position.
 
         // add an Option to this Position's options collection if it is not already there.
         // if it is already there, adjust quantity, and, if quantity now 0, remove it from this Position's optionData collection
@@ -177,6 +181,10 @@ namespace OptionBacktester
         {
 
         }
+
+        public bool Equals(Position x, Position y) => true;
+
+        public int GetHashCode(Position position) => position?.entryDateTime.GetHashCode() ?? throw new ArgumentNullException(nameof(position));
     }
 
     class BSH : Position
@@ -273,7 +281,9 @@ namespace OptionBacktester
         const float BaseCommission = 0.65f + 0.66f;
         StreamWriter errorLog = new StreamWriter(@"C:\Users\lel48\VisualStudioProjects\OptionBacktester.cs\error_log.txt");
 
-        List<Position> positions = new List<Position>();
+        ConcurrentDictionary<int, Position> positions = new(); // concurrent because we analyze each position asynchronously
+        ConcurrentDictionary<int, Position> closedPositions = new(); // concurrent because we add Positions removed from positions asynchronously
+
         System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
 
         // if SPX and SPXW exist for the same expiration date, we throw away the SPXW
@@ -336,6 +346,8 @@ namespace OptionBacktester
 
             watch.Reset();
             watch.Start();
+
+            CheckOptionData();
 
             Backtest();
 
@@ -456,8 +468,7 @@ namespace OptionBacktester
                 {
                     ++rowIndex;
 
-                    OptionData optionData = new OptionData();
-                    validOption = ParseOption(maxDTEToOpen, reader, optionData, rowIndex);
+                    validOption = ParseOption(maxDTEToOpen, reader, out OptionData optionData, rowIndex);
                     if (!validOption)
                         continue;
                     numValidOptions++;
@@ -507,8 +518,6 @@ namespace OptionBacktester
                         optionData.option = option;
                         option.optionDataList.Add(optionData.dt, optionData);
                     }
-
-                    int xxx = 1;
                 }
 
                 // now that we've thrown away SPXW options where there was an SPX optionData with the same expration, we start creating the main two
@@ -585,9 +594,9 @@ namespace OptionBacktester
             optionDataForDelta.Add(optionData.deltaIndex, optionData);
         }
 
-        bool ParseOption(int maxDTE, NpgsqlDataReader reader, OptionData option, int linenum)
+        bool ParseOption(int maxDTE, NpgsqlDataReader reader, out OptionData option, int linenum)
         {
-            Debug.Assert(option != null);
+            option = new();
 
             char optionType = reader.GetChar((int)CBOEFields.OptionType); // TODO: make sure database loader does .Trim().ToUpper();
             option.optionType = (optionType == 'P') ? OptionType.Put : OptionType.Call;
@@ -676,6 +685,17 @@ namespace OptionBacktester
             return true;
         }
 
+        void CheckOptionData()
+        {
+            foreach (Option option in options.Values)
+            {
+                var keys = option.optionDataList.Keys;
+                DateTime firstDateTime = keys[0];
+                DateTime lastDateTime = keys[keys.Count - 1];
+                int aaa = 1;
+            }
+        }
+
         void Backtest()
         {
             // a Position is a combination of Options that we are tracking as a single unit, like an STT-BWB, including adjustemnts
@@ -707,13 +727,11 @@ namespace OptionBacktester
 
                     // loop through all exisiting positions, update their values, and see if they need to be adjusted or closed
 #if PARFOR_ANALYZE
-                    Parallel.ForEach(positions, (position) => {
+                    Parallel.ForEach(positions, ((int key, Position position)) => {
 #else
-                    foreach (Position position in positions)
+                    foreach ((int key, Position position) in positions)
                     {
 #endif
-                        position.closePosition = false;
-
                         // compute value of position at current date/time
                         position.curValue = 0.0f;
                         position.curDelta = 0;
@@ -722,6 +740,7 @@ namespace OptionBacktester
                         {
                             var (option, quantity) = kv.Value;
                             OptionData curOption = option.optionDataList[curDateTime];
+                            position.curDateTime = curDateTime;
                             position.curValue += quantity * curOption.mid * option.multiplier; // a negative value means a credit
                             position.curDelta += quantity * curOption.deltaIndex * 0.01f;
                         }
@@ -743,34 +762,37 @@ namespace OptionBacktester
 #endif
                         // see if we need to close or adjust position
                         // first check the things that all optionData positions must check: maxLoss, profitTarget, minPositionDTE
+                        bool closePosition = false;
                         float pl = position.curValue - position.entryValue;
                         int dit = day.DayNumber - DateOnly.FromDateTime(position.entryDateTime).DayNumber;
                         if (pl < maxLoss)
                         {
-                            position.closePosition = true;
+                            closePosition = true;
                         }
                         else if (position.curValue >= profitTarget)
                         {
-                            position.closePosition = true;
+                            closePosition = true;
                         }
                         else if (dit > maxDIT)
                         {
                             // close trade if dte of original trade is too small
-                            position.closePosition = true;
+                            closePosition = true;
+                        }
+
+                        if (closePosition)
+                        {
+                            bool removed = positions.TryRemove(key, out Position removedPosition);
+                            Debug.Assert(removed);
+                            bool added = closedPositions.TryAdd(key, removedPosition);
+                            Debug.Assert(added);
                         }
                         else
-                        {
-                            // see if we need to adjust or close position
                             position.adjust();
-                        }
 #if PARFOR_ANALYZE
                     });
 #else
                     }
 #endif
-                    // now remove any closed positions from positions collection
-                    positions.RemoveAll(item => item.closePosition);
-
                     // now select new positions for this date and time
                     // first, just select expirations with 120 to 150 dte
                     ExpirationDate initialExpirationDate = day.AddDays(minDTEToOpen);
@@ -878,7 +900,10 @@ namespace OptionBacktester
             position.AddOption(opt5.option, LLQuantity);
             position.AddOption(opt15.option, SSQuantity);
             position.AddOption(opt25.option, ULQuantity);
-            positions.Add(position);
+
+            int newPositoonId = Interlocked.Increment(ref Position.positionId);
+            bool added = positions.TryAdd(newPositoonId, position);
+            Debug.Assert(added);
 
             Trade trade = new Trade();
             trade.tradeType = TradeType.BrokenWingButterfly;
